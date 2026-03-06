@@ -1,5 +1,50 @@
+-- ================================================================
+--  LuaBoost v1.2.1 — WoW 3.3.5a Lua Runtime Optimizer
+--  Author: Suprematist
+--
+--  Features:
+--   - Faster math.floor/ceil/abs (pure Lua, auto-detect)
+--   - Faster table.insert append path
+--   - Per-frame GetTimeCached()
+--   - Shared throttle API, table pool
+--   - Smart incremental GC manager (combat + idle + loading aware)
+--   - SpeedyLoad: event suppression during loading screens
+--   - Optional protection hooks (intercept GC, block memory scans)
+--   - DLL integration (wow_optimize.dll v1.2+)
+--
+--  v1.2.1 changes:
+--   - Localization support (enUS, koKR) and UI improvements by @nadugi
+--   - Fixed debugprofilestop timing logic in GC methods
+--   - Capped emergency GC threshold auto-raise at 1000 MB
+--   - Added 2-second guard to prevent double GC on teleport
+-- ================================================================
+
+local addonName, addonTable = ...
+
 if _G.LUABOOST_LOADED then return end
 _G.LUABOOST_LOADED = true
+
+local L = setmetatable({}, {
+    __index = function(t, k)
+        return k
+    end
+})
+
+if _G.LuaBoost_Locale_enUS then
+    for k, v in pairs(_G.LuaBoost_Locale_enUS) do
+        L[k] = v
+    end
+end
+
+local locale = GetLocale()
+
+if locale == "koKR" and _G.LuaBoost_Locale_koKR then
+    for k, v in pairs(_G.LuaBoost_Locale_koKR) do
+        L[k] = v
+    end
+end
+
+addonTable.L = L
 
 local ADDON_NAME    = "LuaBoost"
 local ADDON_VERSION = "1.2.1"
@@ -26,6 +71,7 @@ local orig_select                 = select
 local orig_collectgarbage         = collectgarbage
 local orig_UpdateAddOnMemoryUsage = UpdateAddOnMemoryUsage
 local orig_GetAddOnMemoryUsage    = GetAddOnMemoryUsage
+local orig_debugprofilestart      = debugprofilestart
 local orig_debugprofilestop       = debugprofilestop
 local orig_min                    = math.min
 local orig_wipe                   = wipe
@@ -60,20 +106,21 @@ end
 
 -- A2. Faster math functions (applied eagerly; may be reverted by auto-detect)
 local function fast_floor(x)
-    x = x + 0
     return x - x % 1
 end
 
 local function fast_ceil(x)
-    x = x + 0
     local f = x - x % 1
-    if f == x then return x end
+    if f == x then
+        return x
+    end
     return f + 1
 end
 
 local function fast_abs(x)
-    x = x + 0
-    if x < 0 then return -x end
+    if x < 0 then
+        return -x
+    end
     return x
 end
 
@@ -84,7 +131,6 @@ math.abs   = fast_abs
 
 -- A2b. Math auto-detect: apply stored choices from SavedVariables
 local function ApplyMathChoices()
-    -- Called after db is available. Reverts to original if bench showed fast is slower.
     if not db then return end
 
     if db.mathUseFloor then
@@ -128,31 +174,31 @@ local function RunMathAutoDetect(silent)
     for i = 1, 5000 do dummy = fast_abs(i * -1.5) end
 
     -- Floor
-    debugprofilestart()
+    orig_debugprofilestart()
     for i = 1, N do dummy = orig_floor(i * 1.7) end
-    local floor_orig_t = debugprofilestop()
+    local floor_orig_t = orig_debugprofilestop()
 
-    debugprofilestart()
+    orig_debugprofilestart()
     for i = 1, N do dummy = fast_floor(i * 1.7) end
-    local floor_fast_t = debugprofilestop()
+    local floor_fast_t = orig_debugprofilestop()
 
     -- Ceil
-    debugprofilestart()
+    orig_debugprofilestart()
     for i = 1, N do dummy = orig_ceil(i * 1.3) end
-    local ceil_orig_t = debugprofilestop()
+    local ceil_orig_t = orig_debugprofilestop()
 
-    debugprofilestart()
+    orig_debugprofilestart()
     for i = 1, N do dummy = fast_ceil(i * 1.3) end
-    local ceil_fast_t = debugprofilestop()
+    local ceil_fast_t = orig_debugprofilestop()
 
     -- Abs
-    debugprofilestart()
+    orig_debugprofilestart()
     for i = 1, N do dummy = orig_abs(i * -1.5) end
-    local abs_orig_t = debugprofilestop()
+    local abs_orig_t = orig_debugprofilestop()
 
-    debugprofilestart()
+    orig_debugprofilestart()
     for i = 1, N do dummy = fast_abs(i * -1.5) end
-    local abs_fast_t = debugprofilestop()
+    local abs_fast_t = orig_debugprofilestop()
 
     -- Decide: use fast unless it's >5% slower than original
     db.mathUseFloor = (floor_fast_t <= floor_orig_t * MATH_BENCH_TOLERANCE)
@@ -166,26 +212,22 @@ local function RunMathAutoDetect(silent)
     if not silent then
         local function tag(use, fast_t, orig_t)
             if use then
-                return "|cff44ff44fast|r"
+                return L["|cff44ff44fast|r"]
             else
-                return orig_format("|cffff4444original|r (fast was %.0f%% slower)",
-                    ((fast_t / orig_t) - 1) * 100)
+                return orig_format(L["|cffff4444original|r (fast was %.0f%% slower)"], ((fast_t / orig_t) - 1) * 100)
             end
         end
 
-        orig_print(ADDON_COLOR .. "[LuaBoost]|r Math auto-detect results (" .. N .. " iterations):")
-        orig_print(orig_format("  math.floor: orig %6.1f ms, fast %6.1f ms > %s",
-            floor_orig_t, floor_fast_t, tag(db.mathUseFloor, floor_fast_t, floor_orig_t)))
-        orig_print(orig_format("  math.ceil:  orig %6.1f ms, fast %6.1f ms > %s",
-            ceil_orig_t, ceil_fast_t, tag(db.mathUseCeil, ceil_fast_t, ceil_orig_t)))
-        orig_print(orig_format("  math.abs:   orig %6.1f ms, fast %6.1f ms > %s",
-            abs_orig_t, abs_fast_t, tag(db.mathUseAbs, abs_fast_t, abs_orig_t)))
+        orig_print(ADDON_COLOR .. string.format(L["[LuaBoost]|r Math auto-detect results (%d iterations):"], N))
+        orig_print(orig_format(L["  math.floor: orig %6.1f ms, fast %6.1f ms > %s"], floor_orig_t, floor_fast_t, tag(db.mathUseFloor, floor_fast_t, floor_orig_t)))
+        orig_print(orig_format(L["  math.ceil:  orig %6.1f ms, fast %6.1f ms > %s"], ceil_orig_t, ceil_fast_t, tag(db.mathUseCeil, ceil_fast_t, ceil_orig_t)))
+        orig_print(orig_format(L["  math.abs:   orig %6.1f ms, fast %6.1f ms > %s"], abs_orig_t, abs_fast_t, tag(db.mathUseAbs, abs_fast_t, abs_orig_t)))
 
         local count = 0
         if db.mathUseFloor then count = count + 1 end
         if db.mathUseCeil  then count = count + 1 end
         if db.mathUseAbs   then count = count + 1 end
-        orig_print(orig_format("  Using fast versions for %d/3 functions. Saved to settings.", count))
+        orig_print(orig_format(L["  Using fast versions for %d/3 functions. Saved to settings."], count))
     end
 end
 
@@ -315,7 +357,7 @@ local defaults = {
     speedyLoadEnabled      = false,
     speedyLoadMode         = "safe",
 
-    -- Math auto-detect (v1.2.0)
+    -- Math auto-detect
     mathAutoDetect         = true,
     mathBenchDone          = false,
     mathUseFloor           = true,
@@ -324,8 +366,6 @@ local defaults = {
 }
 
 local presets = {
-    -- Light addon setup: minimal GC overhead, low CPU cost per frame
-    -- Good for: few addons, no WeakAuras, simple UI
     weak = {
         frameStepKB            = 20,        
         combatStepKB           = 5,
@@ -334,8 +374,6 @@ local presets = {
         fullCollectThresholdMB = 150,       
         idleTimeout            = 15,        
     },
-    -- Balanced: works for most players with moderate addon setups
-    -- Good for: DBM or BigWigs + one damage meter + some UI addons
     mid = {
         frameStepKB            = 50,        
         combatStepKB           = 15,        
@@ -344,8 +382,6 @@ local presets = {
         fullCollectThresholdMB = 300,       
         idleTimeout            = 15,
     },
-    -- Heavy addon setup: aggressive cleanup, prevents post-boss freezes
-    -- Good for: DBM + WeakAuras + Skada + nameplates + everything
     strong = {
         frameStepKB            = 100,       
         combatStepKB           = 30,        
@@ -377,7 +413,7 @@ end
 
 local function DebugMsg(text)
     if db and db.debugMode then
-        orig_print("|cff888888[LuaBoost-DBG]|r " .. text)
+        orig_print(L["|cff888888[LuaBoost-DBG]|r "] .. text)
     end
 end
 
@@ -429,10 +465,10 @@ local function GetCurrentStepKB()
 end
 
 local function GetModeString()
-    if isLoading then return "|cff4488ffloading|r" end
-    if inCombat then return "|cffff4444combat|r" end
-    if isIdle then return "|cff888888idle|r" end
-    return "|cff44ff44normal|r"
+    if isLoading then return L["|cff4488ffloading|r"] end
+    if inCombat then return L["|cffff4444combat|r"] end
+    if isIdle then return L["|cff888888idle|r"] end
+    return L["|cff44ff44normal|r"]
 end
 
 local function RefreshAllControls()
@@ -529,11 +565,10 @@ gcFrame:SetScript("OnUpdate", function()
     if not db or not db.enabled then return end
 
     -- Idle detection
-    if not isIdle and not inCombat and not isLoading
-       and (orig_GetTime() - lastActivity) > db.idleTimeout then
+    if not isIdle and not inCombat and not isLoading and (orig_GetTime() - lastActivity) > db.idleTimeout then
         isIdle = true
         WriteIdleGlobal()
-        DebugMsg("Idle mode activated")
+        DebugMsg(L["Idle mode activated"])
     end
 
     -- Periodic: re-stop GC
@@ -546,7 +581,7 @@ gcFrame:SetScript("OnUpdate", function()
     -- Emergency full GC (not in combat, not loading)
     local memKB = orig_collectgarbage("count")
     if memKB > (db.fullCollectThresholdMB * 1024) and not inCombat and not isLoading then
-        debugprofilestart()
+        orig_debugprofilestart()
         orig_collectgarbage("collect")
         orig_collectgarbage("collect")
         local dt = orig_debugprofilestop()
@@ -554,12 +589,11 @@ gcFrame:SetScript("OnUpdate", function()
         local memAfterKB = orig_collectgarbage("count")
         gcStats.emergencyGC = gcStats.emergencyGC + 1
 
-        DebugMsg(orig_format("Emergency GC: freed %.1f MB in %.1f ms",
-            (memKB - memAfterKB) / 1024, dt))
+        DebugMsg(orig_format(L["Emergency GC: freed %.1f MB in %.1f ms"], (memKB - memAfterKB) / 1024, dt))
 
         if dt > 50 and db.fullCollectThresholdMB < 1000 then
             db.fullCollectThresholdMB = db.fullCollectThresholdMB + 20
-            DebugMsg("Raised threshold to " .. db.fullCollectThresholdMB .. " MB")
+            DebugMsg(string.format(L["Raised threshold to %d MB"], db.fullCollectThresholdMB))
         end
 
         orig_collectgarbage("stop")
@@ -656,9 +690,13 @@ local activityEvents = {
 for _, event in orig_pairs(activityEvents) do
     activityFrame:RegisterEvent(event)
 end
+
 activityFrame:SetScript("OnEvent", function()
     lastActivity = orig_GetTime()
-    if isIdle then isIdle = false; WriteIdleGlobal() end
+    if isIdle then
+        isIdle = false
+        WriteIdleGlobal()
+    end
 end)
 
 -- ================================================================
@@ -709,7 +747,7 @@ local speedyOccurred   = {}
 local speedySuppressed = false
 local speedyListenUnreg = false
 local speedyHooked     = false
-local lastPostLoadGC = 0
+local lastPostLoadGC   = 0
 
 local speedyFrame = hasGetFramesForEvent and CreateFrame("Frame") or nil
 
@@ -728,7 +766,9 @@ end
 local function SpeedyLoad_Suppress()
     if not hasGetFramesForEvent or not speedyFrame then return 0 end
 
-    for k in orig_pairs(speedyTracked) do speedyTracked[k] = nil end
+    for k in orig_pairs(speedyTracked) do
+        speedyTracked[k] = nil
+    end
     orig_wipe(speedyOccurred)
 
     local eventList = GetSpeedyEventList()
@@ -821,7 +861,7 @@ local function SpeedyLoad_HookUnregister()
 
     if ok then
         speedyHooked = true
-        DebugMsg("SpeedyLoad: UnregisterEvent hook installed")
+        DebugMsg(L["SpeedyLoad: UnregisterEvent hook installed"])
     end
 end
 
@@ -847,7 +887,7 @@ local function SpeedyLoad_EnsurePriority()
         orig_pcall(PetStableFrame.UnregisterEvent, PetStableFrame, "SPELLS_CHANGED")
     end
 
-    DebugMsg("SpeedyLoad: PLAYER_ENTERING_WORLD priority set")
+    DebugMsg(L["SpeedyLoad: PLAYER_ENTERING_WORLD priority set"])
 end
 
 -- ================================================================
@@ -884,8 +924,7 @@ loadFrame:SetScript("OnEvent", function(self, event)
 
         if db and db.speedyLoadEnabled then
             local n = SpeedyLoad_Suppress()
-            DebugMsg(orig_format("SpeedyLoad: suppressed %d registrations (%s)",
-                n, db.speedyLoadMode))
+            DebugMsg(orig_format("SpeedyLoad: suppressed %d registrations (%s)", n, db.speedyLoadMode))
         end
 
     elseif event == "LOADING_SCREEN_ENABLED" then
@@ -903,7 +942,10 @@ loadFrame:SetScript("OnEvent", function(self, event)
         isLoading = false
         WriteLoadingGlobal()
         lastActivity = orig_GetTime()
-        if isIdle then isIdle = false; WriteIdleGlobal() end
+        if isIdle then
+            isIdle = false
+            WriteIdleGlobal()
+        end
 
         DoPostLoadGC()
 
@@ -917,7 +959,10 @@ loadFrame:SetScript("OnEvent", function(self, event)
             isLoading = false
             WriteLoadingGlobal()
             lastActivity = orig_GetTime()
-            if isIdle then isIdle = false; WriteIdleGlobal() end
+            if isIdle then
+                isIdle = false
+                WriteIdleGlobal()
+            end
 
             DoPostLoadGC()
         end
@@ -928,7 +973,6 @@ end)
 -- PART D: Benchmark
 -- ================================================================
 
--- [v1.2.0] Correct faster/slower formatting
 local function FormatBenchLine(label, orig_t, fast_t, suffix)
     suffix = suffix or ""
     if orig_t <= 0 then
@@ -936,11 +980,9 @@ local function FormatBenchLine(label, orig_t, fast_t, suffix)
     end
     local p = (1 - fast_t / orig_t) * 100
     if p >= 0 then
-        return orig_format("  %-14s %7.1f ms -> %7.1f ms  (|cff44ff44%.0f%% faster|r)%s",
-            label, orig_t, fast_t, p, suffix)
+        return orig_format(L["  %-14s %7.1f ms -> %7.1f ms  (|cff44ff44%.0f%% faster|r)%s"], label, orig_t, fast_t, p, suffix)
     else
-        return orig_format("  %-14s %7.1f ms -> %7.1f ms  (|cffff4444%.0f%% slower|r)%s",
-            label, orig_t, fast_t, -p, suffix)
+        return orig_format(L["  %-14s %7.1f ms -> %7.1f ms  (|cffff4444%.0f%% slower|r)%s"], label, orig_t, fast_t, -p, suffix)
     end
 end
 
@@ -948,55 +990,55 @@ local function RunBenchmark()
     local N = 1000000
     local dummy = 0
 
-    orig_print(ADDON_COLOR .. "[LuaBoost]|r Running benchmark (" .. N .. " iterations)...")
+    orig_print(ADDON_COLOR .. string.format(L["[LuaBoost]|r Running benchmark (%d iterations)..."], N))
 
-    debugprofilestart()
+    orig_debugprofilestart()
     for i = 1, N do dummy = orig_floor(i * 1.7) end
-    local floor_orig = debugprofilestop()
+    local floor_orig = orig_debugprofilestop()
 
-    debugprofilestart()
+    orig_debugprofilestart()
     for i = 1, N do dummy = fast_floor(i * 1.7) end
-    local floor_fast = debugprofilestop()
+    local floor_fast = orig_debugprofilestop()
 
-    debugprofilestart()
+    orig_debugprofilestart()
     for i = 1, N do dummy = orig_ceil(i * 1.3) end
-    local ceil_orig = debugprofilestop()
+    local ceil_orig = orig_debugprofilestop()
 
-    debugprofilestart()
+    orig_debugprofilestart()
     for i = 1, N do dummy = fast_ceil(i * 1.3) end
-    local ceil_fast = debugprofilestop()
+    local ceil_fast = orig_debugprofilestop()
 
-    debugprofilestart()
+    orig_debugprofilestart()
     for i = 1, N do dummy = orig_abs(i * -1.5) end
-    local abs_orig = debugprofilestop()
+    local abs_orig = orig_debugprofilestop()
 
-    debugprofilestart()
+    orig_debugprofilestart()
     for i = 1, N do dummy = fast_abs(i * -1.5) end
-    local abs_fast = debugprofilestop()
+    local abs_fast = orig_debugprofilestop()
 
     local K = 100000
     local benchTable = {}
-    debugprofilestart()
+    orig_debugprofilestart()
     for i = 1, K do orig_tinsert(benchTable, i) end
-    local insert_orig = debugprofilestop()
+    local insert_orig = orig_debugprofilestop()
 
     benchTable = {}
-    debugprofilestart()
+    orig_debugprofilestart()
     for i = 1, K do benchTable[#benchTable + 1] = i end
-    local insert_fast = debugprofilestop()
+    local insert_fast = orig_debugprofilestop()
 
-    -- [v1.2.0] Show active status for each math function
     local function activeTag(use)
-        if use then return " |cff44ff44[active]|r" else return " |cff888888[original]|r" end
+        if use then
+            return L[" |cff44ff44[active]|r"]
+        else
+            return L[" |cff888888[original]|r"]
+        end
     end
 
-    orig_print(ADDON_COLOR .. "[LuaBoost]|r Results (lower ms = better):")
-    orig_print(FormatBenchLine("math.floor:",   floor_orig,  floor_fast,
-        db and activeTag(db.mathUseFloor) or ""))
-    orig_print(FormatBenchLine("math.ceil:",    ceil_orig,   ceil_fast,
-        db and activeTag(db.mathUseCeil) or ""))
-    orig_print(FormatBenchLine("math.abs:",     abs_orig,    abs_fast,
-        db and activeTag(db.mathUseAbs) or ""))
+    orig_print(ADDON_COLOR .. L["[LuaBoost]|r Results (lower ms = better):"])
+    orig_print(FormatBenchLine("math.floor:",   floor_orig,  floor_fast,  db and activeTag(db.mathUseFloor) or ""))
+    orig_print(FormatBenchLine("math.ceil:",    ceil_orig,   ceil_fast,   db and activeTag(db.mathUseCeil) or ""))
+    orig_print(FormatBenchLine("math.abs:",     abs_orig,    abs_fast,    db and activeTag(db.mathUseAbs) or ""))
     orig_print(FormatBenchLine("table.insert:", insert_orig, insert_fast, " (100k)"))
 end
 
@@ -1022,8 +1064,13 @@ local function Checkbox(parent, label, tip, x, y, get, set)
     cb.tooltipText = label
     cb.tooltipRequirement = tip
 
-    function cb:Refresh() self:SetChecked(get()) end
-    cb:SetScript("OnClick", function(self) set(self:GetChecked() and true or false) end)
+    function cb:Refresh()
+        self:SetChecked(get())
+    end
+
+    cb:SetScript("OnClick", function(self)
+        set(self:GetChecked() and true or false)
+    end)
 
     cb:Refresh()
     allControls[#allControls + 1] = cb
@@ -1075,12 +1122,15 @@ panelMain.name = "LuaBoost"
 panelMain:Hide()
 
 panelMain:SetScript("OnShow", function(self)
-    if self.built then RefreshAllControls() return end
+    if self.built then
+        RefreshAllControls()
+        return
+    end
     self.built = true
 
     Label(self, ADDON_COLOR .. "LuaBoost|r v" .. ADDON_VERSION, 16, -16, "GameFontNormalLarge")
 
-    Label(self, "Lua runtime optimizer + smart garbage collector for WoW 3.3.5a.", 16, -36, "GameFontHighlightSmall")
+    Label(self, L["Lua runtime optimizer + smart garbage collector for WoW 3.3.5a."], 16, -36, "GameFontHighlightSmall")
 
     local statusLabel = Label(self, "", 16, -56, "GameFontNormal")
     statusLabel:SetWidth(500)
@@ -1092,10 +1142,10 @@ panelMain:SetScript("OnShow", function(self)
         timer = 0
         if not db then return end
 
-        local dllTag = hasDLL() and " | |cff00ff00DLL|r" or ""
+        local dllTag = hasDLL() and L[" | |cff00ff00DLL|r"] or ""
         statusLabel:SetText(orig_format(
-            "%s  |  Mem: %s%.1f MB|r  |  %s  |  %s%d|r KB/f%s",
-            db.enabled and "|cff00ff00ON|r" or "|cffff0000OFF|r",
+            L["%s  |  Mem: %s%.1f MB|r  |  %s  |  %s%d|r KB/f%s"],
+            db.enabled and L["|cff00ff00ON|r"] or L["|cffff0000OFF|r"],
             VALUE_COLOR, GetMemoryMB(),
             GetModeString(),
             VALUE_COLOR, GetCurrentStepKB(),
@@ -1103,8 +1153,8 @@ panelMain:SetScript("OnShow", function(self)
         ))
     end)
 
-    Checkbox(self, "Enable GC Manager",
-        "Master toggle for smart GC.",
+    Checkbox(self, L["Enable GC Manager"],
+        L["Master toggle for smart GC."],
         14, -76,
         function() return db.enabled end,
         function(v)
@@ -1118,18 +1168,18 @@ panelMain:SetScript("OnShow", function(self)
         end
     )
 
-    Label(self, "GC Presets:", 16, -106, "GameFontNormal")
+    Label(self, L["GC Presets:"], 16, -106, "GameFontNormal")
 
     local pdata = {
-        { k = "weak",   l = "|cffff8844Weak|r",   x = 95 },
-        { k = "mid",    l = "|cffffff44Mid|r",    x = 205 },
-        { k = "strong", l = "|cff44ff44Strong|r", x = 315 },
+        { k = "weak",   l = L["|cffff8844Weak|r"],   x = 16 },
+        { k = "mid",    l = L["|cffffff44Mid|r"],    x = 126 },
+        { k = "strong", l = L["|cff44ff44Strong|r"], x = 236 },
     }
 
     for _, p in orig_pairs(pdata) do
         local b = CreateFrame("Button", nil, self, "UIPanelButtonTemplate")
         b:SetSize(100, 22)
-        b:SetPoint("TOPLEFT", p.x, -103)
+        b:SetPoint("TOPLEFT", p.x, -130)
         b:SetText(p.l)
         b:SetScript("OnClick", function()
             ApplyPreset(p.k)
@@ -1137,36 +1187,37 @@ panelMain:SetScript("OnShow", function(self)
         end)
     end
 
-    Label(self, "Runtime optimizations are always active.", 16, -138, "GameFontHighlightSmall")
+    Label(self, L["Runtime optimizations are always active."], 16, -165, "GameFontHighlightSmall")
 
     -- SpeedyLoad section
-    Label(self, "Loading Screen Optimization", 16, -170, "GameFontNormal")
+    Label(self, L["Loading Screen Optimization"], 16, -195, "GameFontNormal")
 
-    Checkbox(self, "Enable Fast Loading Screens",
-        "Temporarily suppresses noisy events during loading screens.\n"
-        .. "Reduces CPU work and speeds up zone transitions.\n"
-        .. "Restores all events after loading completes.",
-        14, -190,
+    Checkbox(self, L["Enable Fast Loading Screens"],
+        L["Temporarily suppresses noisy events during loading screens.\n"]
+        .. L["Reduces CPU work and speeds up zone transitions.\n"]
+        .. L["Restores all events after loading completes."],
+        14, -215,
         function() return db.speedyLoadEnabled end,
         function(v) db.speedyLoadEnabled = v end
     )
 
-    local speedyModeLabel = Label(self, "", 16, -218, "GameFontHighlightSmall")
-    speedyModeLabel:SetWidth(300)
+    local speedyModeLabel = Label(self, "", 16, -275, "GameFontHighlightSmall")
+    speedyModeLabel:SetWidth(400)
 
+    -- Adjusted layout and added line breaks to prevent font rendering
+    -- glitches and overlapping issues in Korean.
     local function UpdateSpeedyModeLabel()
-        if not db then return end
-        if db.speedyLoadMode == "aggressive" then
-            speedyModeLabel:SetText("Mode: |cffff8844Aggressive|r (" .. #SPEEDY_AGGRESSIVE_EVENTS .. " events)")
-        else
-            speedyModeLabel:SetText("Mode: |cff44ff44Safe|r (" .. #SPEEDY_SAFE_EVENTS .. " events)")
-        end
+        if not db or not speedyModeLabel then return end
+        local isAggressive = (db.speedyLoadMode == "aggressive")
+        local modeStr = isAggressive and "|cffff8844Aggressive|r" or "|cff44ff44Safe|r"
+        local count = isAggressive and #SPEEDY_AGGRESSIVE_EVENTS or #SPEEDY_SAFE_EVENTS
+        speedyModeLabel:SetText(string.format(L["Mode: %s (%d events)"], modeStr, count))
     end
 
     local safeBtn = CreateFrame("Button", nil, self, "UIPanelButtonTemplate")
     safeBtn:SetSize(100, 22)
-    safeBtn:SetPoint("TOPLEFT", 220, -188)
-    safeBtn:SetText("|cff44ff44Safe|r")
+    safeBtn:SetPoint("TOPLEFT", 16, -245)
+    safeBtn:SetText(L["|cff44ff44Safe|r"])
     safeBtn:SetScript("OnClick", function()
         db.speedyLoadMode = "safe"
         UpdateSpeedyModeLabel()
@@ -1174,8 +1225,8 @@ panelMain:SetScript("OnShow", function(self)
 
     local aggBtn = CreateFrame("Button", nil, self, "UIPanelButtonTemplate")
     aggBtn:SetSize(100, 22)
-    aggBtn:SetPoint("TOPLEFT", 320, -188)
-    aggBtn:SetText("|cffff8844Aggressive|r")
+    aggBtn:SetPoint("TOPLEFT", 126, -245)
+    aggBtn:SetText(L["|cffff8844Aggressive|r"])
     aggBtn:SetScript("OnClick", function()
         db.speedyLoadMode = "aggressive"
         UpdateSpeedyModeLabel()
@@ -1184,8 +1235,8 @@ panelMain:SetScript("OnShow", function(self)
     UpdateSpeedyModeLabel()
 
     if not hasGetFramesForEvent then
-        Label(self, "|cffff4444GetFramesRegisteredForEvent not available — SpeedyLoad disabled.|r",
-            16, -238, "GameFontHighlightSmall")
+        Label(self, L["|cffff4444GetFramesRegisteredForEvent not available — SpeedyLoad disabled.|r"],
+            16, -300, "GameFontHighlightSmall")
     end
 end)
 
@@ -1193,54 +1244,57 @@ InterfaceOptions_AddCategory(panelMain)
 
 -- GC Settings panel
 local panelSettings = CreateFrame("Frame", "LuaBoostPanelSettings", InterfaceOptionsFramePanelContainer)
-panelSettings.name = "GC Settings"
+panelSettings.name = L["GC Settings"]
 panelSettings.parent = "LuaBoost"
 panelSettings:Hide()
 
 panelSettings:SetScript("OnShow", function(self)
-    if self.built then RefreshAllControls() return end
+    if self.built then
+        RefreshAllControls()
+        return
+    end
     self.built = true
 
-    Label(self, ADDON_COLOR .. "GC Settings|r", 16, -16, "GameFontNormalLarge")
+    Label(self, ADDON_COLOR .. L["GC Settings|r"], 16, -16, "GameFontNormalLarge")
 
-    Label(self, "Step Sizes (KB collected per frame)", 16, -56, "GameFontNormal")
+    Label(self, L["Step Sizes (KB collected per frame)"], 16, -46, "GameFontNormal")
 
     -- [v1.2.0] Expanded slider ranges for heavy addon setups
-    Slider(self, "Normal Step", "GC per frame during normal gameplay.", 20, -86,
-        1, 500, 5,                                                          -- was 1-200
+    Slider(self, L["Normal Step"], L["GC per frame during normal gameplay."], 20, -86,
+        1, 500, 5,
         function() return db.frameStepKB end,
-        function(v) db.frameStepKB = v; db.preset = "custom" end
+        function(v) db.frameStepKB = v; db.preset = L["custom"] end
     )
 
-    Slider(self, "Combat Step", "GC per frame in combat (keep low to protect frametime).", 20, -138,
-        0, 100, 1,                                                          -- was 0-50
+    Slider(self, L["Combat Step"], L["GC per frame in combat (keep low to protect frametime)."], 20, -138,
+        0, 100, 1,
         function() return db.combatStepKB end,
-        function(v) db.combatStepKB = v; db.preset = "custom" end
+        function(v) db.combatStepKB = v; db.preset = L["custom"] end
     )
 
-    Slider(self, "Idle Step", "GC per frame while AFK/idle.", 20, -190,
-        10, 1000, 10,                                                       -- was 10-500
+    Slider(self, L["Idle Step"], L["GC per frame while AFK/idle."], 20, -190,
+        10, 1000, 10,
         function() return db.idleStepKB end,
-        function(v) db.idleStepKB = v; db.preset = "custom" end
+        function(v) db.idleStepKB = v; db.preset = L["custom"] end
     )
 
-    Slider(self, "Loading Step", "GC per frame during loading screens (no rendering).", 20, -242,
-        50, 1000, 25,                                                       -- was 50-500
+    Slider(self, L["Loading Step"], L["GC per frame during loading screens (no rendering)."], 20, -242,
+        50, 1000, 25,
         function() return db.loadingStepKB end,
-        function(v) db.loadingStepKB = v; db.preset = "custom" end
+        function(v) db.loadingStepKB = v; db.preset = L["custom"] end
     )
 
-    Label(self, "Thresholds", 16, -296, "GameFontNormal")
+    Label(self, L["Thresholds"], 16, -286, "GameFontNormal")
 
-    Slider(self, "Emergency Full GC (MB)",
-        "Force full GC outside combat when memory exceeds this.\n"
-        .. "Set higher (300-500+) if you use many addons to avoid long freezes.", 20, -326,
-        20, 1000, 10,                                                       -- was 20-300
+    Slider(self, L["Emergency Full GC (MB)"],
+        L["Force full GC outside combat when memory exceeds this.\n"]
+        .. L["Set higher (300-500+) if you use many addons to avoid long freezes."], 20, -326,
+        20, 1000, 10,
         function() return db.fullCollectThresholdMB end,
-        function(v) db.fullCollectThresholdMB = v; db.preset = "custom" end
+        function(v) db.fullCollectThresholdMB = v; db.preset = L["custom"] end
     )
 
-    Slider(self, "Idle Timeout (sec)", "Seconds without activity before idle mode.", 20, -378,
+    Slider(self, L["Idle Timeout (sec)"], L["Seconds without activity before idle mode."], 20, -378,
         5, 120, 5,
         function() return db.idleTimeout end,
         function(v) db.idleTimeout = v end
@@ -1251,57 +1305,60 @@ InterfaceOptions_AddCategory(panelSettings)
 
 -- Tools panel
 local panelTools = CreateFrame("Frame", "LuaBoostPanelTools", InterfaceOptionsFramePanelContainer)
-panelTools.name = "Tools"
+panelTools.name = L["Tools"]
 panelTools.parent = "LuaBoost"
 panelTools:Hide()
 
 panelTools:SetScript("OnShow", function(self)
-    if self.built then RefreshAllControls() return end
+    if self.built then
+        RefreshAllControls()
+        return
+    end
     self.built = true
 
-    Label(self, ADDON_COLOR .. "Tools & Diagnostics|r", 16, -16, "GameFontNormalLarge")
+    Label(self, ADDON_COLOR .. L["Tools & Diagnostics|r"], 16, -16, "GameFontNormalLarge")
 
-    Checkbox(self, "Debug mode (GC info in chat)",
-        "Shows GC mode changes, SpeedyLoad activity, and emergency collections.",
+    Checkbox(self, L["Debug mode (GC info in chat)"],
+        L["Shows GC mode changes, SpeedyLoad activity, and emergency collections."],
         14, -40,
         function() return db.debugMode end,
         function(v) db.debugMode = v end
     )
 
-    Checkbox(self, "Intercept collectgarbage() calls",
-        "Blocks full GC calls triggered by other addons.\n"
-        .. "|cffff4444WARNING:|r Causes taint with ElvUI and secure frames.\n"
-        .. "Leave OFF if you see 'action blocked' errors.",
+    Checkbox(self, L["Intercept collectgarbage() calls"],
+        L["Blocks full GC calls triggered by other addons.\n"]
+        .. L["|cffff4444WARNING:|r Causes taint with ElvUI and secure frames.\n"]
+        .. L["Leave OFF if you see 'action blocked' errors."],
         14, -66,
         function() return db.interceptGC end,
         function(v) db.interceptGC = v and true or false; ApplyProtectionHooks() end
     )
 
-    Checkbox(self, "Block UpdateAddOnMemoryUsage()",
-        "Blocks heavy addon memory scans.\n"
-        .. "|cffff4444WARNING:|r Causes taint with ElvUI and secure frames.\n"
-        .. "Leave OFF if you see 'action blocked' errors.",
+    Checkbox(self, L["Block UpdateAddOnMemoryUsage()"],
+        L["Blocks heavy addon memory scans.\n"]
+        .. L["|cffff4444WARNING:|r Causes taint with ElvUI and secure frames.\n"]
+        .. L["Leave OFF if you see 'action blocked' errors."],
         14, -92,
         function() return db.blockMemoryUsage end,
         function(v) db.blockMemoryUsage = v and true or false; ApplyProtectionHooks() end
     )
 
-    Slider(self, "MemUsage Min Interval (sec)", "Minimum interval between UpdateAddOnMemoryUsage() calls.", 20, -132,
+    Slider(self, L["MemUsage Min Interval (sec)"], L["Minimum interval between UpdateAddOnMemoryUsage() calls."], 20, -138,
         0, 10, 1,
         function() return db.memoryUsageMinInterval end,
         function(v) db.memoryUsageMinInterval = v end
     )
 
-    local resultLabel = Label(self, "", 200, -175, "GameFontHighlightSmall")
+    local resultLabel = Label(self, "", 200, -180, "GameFontHighlightSmall")
     resultLabel:SetWidth(300)
 
     local forceBtn = CreateFrame("Button", nil, self, "UIPanelButtonTemplate")
     forceBtn:SetSize(170, 22)
     forceBtn:SetPoint("TOPLEFT", 16, -172)
-    forceBtn:SetText("Force Full GC Now")
+    forceBtn:SetText(L["Force Full GC Now"])
     forceBtn:SetScript("OnClick", function()
         local before = orig_collectgarbage("count")
-        debugprofilestart()
+        orig_debugprofilestart()
 
         if hasDLL() and LuaBoostC_GCCollect then
             LuaBoostC_GCCollect()
@@ -1314,7 +1371,7 @@ panelTools:SetScript("OnShow", function(self)
         local after = orig_collectgarbage("count")
         local freed = (before - after) / 1024
 
-        resultLabel:SetText(orig_format("|cff44ff44Freed %.1f MB in %.1f ms|r", freed, dt))
+        resultLabel:SetText(orig_format(L["|cff44ff44Freed %.1f MB in %.1f ms|r"], freed, dt))
         gcStats.fullCollects = gcStats.fullCollects + 1
         orig_collectgarbage("stop")
     end)
@@ -1322,17 +1379,18 @@ panelTools:SetScript("OnShow", function(self)
     local benchBtn = CreateFrame("Button", nil, self, "UIPanelButtonTemplate")
     benchBtn:SetSize(170, 22)
     benchBtn:SetPoint("TOPLEFT", 16, -200)
-    benchBtn:SetText("Run Benchmark")
+    benchBtn:SetText(L["Run Benchmark"])
     benchBtn:SetScript("OnClick", function() RunBenchmark() end)
 
     local resetBtn = CreateFrame("Button", nil, self, "UIPanelButtonTemplate")
     resetBtn:SetSize(170, 22)
     resetBtn:SetPoint("TOPLEFT", 16, -228)
-    resetBtn:SetText("Reset All to Defaults")
+    resetBtn:SetText(L["Reset All to Defaults"])
     resetBtn:SetScript("OnClick", function()
         StaticPopupDialogs["LUABOOST_RESET"] = {
-            text = "Reset all LuaBoost settings to defaults?\n(Math auto-detect will re-run on next login)",
-            button1 = "Yes", button2 = "No",
+            text = L["Reset all LuaBoost settings to defaults?\n(Math auto-detect will re-run on next login)"],
+            button1 = L["Yes"],
+            button2 = L["No"],
             OnAccept = function()
                 LuaBoostDB = nil
                 InitDB()
@@ -1340,13 +1398,15 @@ panelTools:SetScript("OnShow", function(self)
                 RefreshAllControls()
                 resultLabel:SetText("")
             end,
-            timeout = 0, whileDead = true, hideOnEscape = true,
+            timeout = 0,
+            whileDead = true,
+            hideOnEscape = true,
         }
         StaticPopup_Show("LUABOOST_RESET")
     end)
 
     -- [v1.2.0] Math auto-detect section
-    Label(self, "Math Optimizations", 16, -268, "GameFontNormal")
+    Label(self, L["Math Optimizations"], 16, -268, "GameFontNormal")
 
     local mathStatusLabel = Label(self, "", 16, -288, "GameFontHighlightSmall")
     mathStatusLabel:SetWidth(500)
@@ -1354,9 +1414,13 @@ panelTools:SetScript("OnShow", function(self)
     local function UpdateMathStatus()
         if not db then return end
         local function fn_status(use, name)
-            if use then return "|cff44ff44fast|r" else return "|cff888888original|r" end
+            if use then
+                return "|cff44ff44fast|r"
+            else
+                return "|cff888888original|r"
+            end
         end
-        local benchTag = db.mathBenchDone and "|cff44ff44done|r" or "|cffffff44pending|r"
+        local benchTag = db.mathBenchDone and L["|cff44ff44done|r"] or L["|cffffff44pending|r"]
         mathStatusLabel:SetText(orig_format(
             "floor: %s  |  ceil: %s  |  abs: %s  |  bench: %s",
             fn_status(db.mathUseFloor, "floor"),
@@ -1366,19 +1430,19 @@ panelTools:SetScript("OnShow", function(self)
         ))
     end
 
-    Checkbox(self, "Auto-detect math on first run",
-        "Runs a quick micro-benchmark on first login to determine\n"
-        .. "whether fast math replacements are actually faster on your CPU.\n"
-        .. "Result is saved — bench only runs once.",
-        14, -304,
+    Checkbox(self, L["Auto-detect math on first run"],
+        L["Runs a quick micro-benchmark on first login to determine\n"]
+        .. L["whether fast math replacements are actually faster on your CPU.\n"]
+        .. L["Result is saved — bench only runs once."],
+        14, -315,
         function() return db.mathAutoDetect end,
         function(v) db.mathAutoDetect = v end
     )
 
     local mathBenchBtn = CreateFrame("Button", nil, self, "UIPanelButtonTemplate")
     mathBenchBtn:SetSize(170, 22)
-    mathBenchBtn:SetPoint("TOPLEFT", 16, -332)
-    mathBenchBtn:SetText("Re-run Math Auto-detect")
+    mathBenchBtn:SetPoint("TOPLEFT", 16, -345)
+    mathBenchBtn:SetText(L["Re-run Math Auto-detect"])
     mathBenchBtn:SetScript("OnClick", function()
         db.mathBenchDone = false
         RunMathAutoDetect(false)
@@ -1406,31 +1470,35 @@ InterfaceOptions_AddCategory(panelTools)
 local function ShowStatus()
     orig_print(ADDON_COLOR .. "[LuaBoost]|r v" .. ADDON_VERSION)
     if db then
-        orig_print(orig_format("  GC: %s | Mode: %s | Mem: %.1f MB | Step: %d KB/f",
-            db.enabled and "|cff00ff00ON|r" or "|cffff0000OFF|r",
+        orig_print(orig_format(L["  GC: %s | Mode: %s | Mem: %.1f MB | Step: %d KB/f"],
+            db.enabled and L["|cff00ff00ON|r"] or L["|cffff0000OFF|r"],
             GetModeString(), GetMemoryMB(), GetCurrentStepKB()))
-        orig_print(orig_format("  Protection: interceptGC=%s, blockMemUsage=%s",
-            db.interceptGC and "on" or "off",
-            db.blockMemoryUsage and "on" or "off"))
-        orig_print(orig_format("  SpeedyLoad: %s (%s, %d events)",
-            db.speedyLoadEnabled and "|cff00ff00ON|r" or "|cffaaaaaaOFF|r",
-            db.speedyLoadMode,
+
+        orig_print(orig_format(L["  Protection: interceptGC=%s, blockMemUsage=%s"],
+            db.interceptGC and L["on"] or L["off"],
+            db.blockMemoryUsage and L["on"] or L["off"]))
+
+        orig_print(orig_format(L["  SpeedyLoad: %s (%s, %d events)"],
+            db.speedyLoadEnabled and L["|cff00ff00ON|r"] or L["|cffaaaaaaOFF|r"],
+            db.speedyLoadMode == "aggressive" and L["aggressive"] or L["safe"],
             #GetSpeedyEventList()))
+
         -- [v1.2.0] Math status
         local mathCount = 0
         if db.mathUseFloor then mathCount = mathCount + 1 end
         if db.mathUseCeil  then mathCount = mathCount + 1 end
         if db.mathUseAbs   then mathCount = mathCount + 1 end
-        orig_print(orig_format("  Math: %d/3 fast | bench: %s",
+        orig_print(orig_format(L["  Math: %d/3 fast | bench: %s"],
             mathCount,
-            db.mathBenchDone and "done" or "pending"))
+            db.mathBenchDone and L["done"] or L["pending"]))
     end
+
     if hasDLL() then
-        orig_print("  wow_optimize.dll: |cff00ff00CONNECTED|r")
+        orig_print(L["  wow_optimize.dll: |cff00ff00CONNECTED|r"])
     else
-        orig_print("  wow_optimize.dll: |cffaaaaaaNOT DETECTED|r")
+        orig_print(L["  wow_optimize.dll: |cffaaaaaaNOT DETECTED|r"])
     end
-    orig_print("  " .. VALUE_COLOR .. "/lb help|r")
+    orig_print("  " .. VALUE_COLOR .. L["/lb help|r"])
 end
 
 SLASH_LUABOOST1 = "/luaboost"
@@ -1444,32 +1512,36 @@ SlashCmdList["LUABOOST"] = function(input)
 
     elseif input == "gc" then
         local memKB = orig_collectgarbage("count")
-        orig_print(ADDON_COLOR .. "[LuaBoost]|r GC Stats:")
-        orig_print(orig_format("  Memory: %.0f KB (%.1f MB)", memKB, memKB / 1024))
-        orig_print(orig_format("  Mode: %s | Step: %d KB/f", GetModeString(), GetCurrentStepKB()))
-        orig_print(orig_format("  Lua steps: %d | Emergency: %d | Full: %d",
+        orig_print(ADDON_COLOR .. L["[LuaBoost]|r GC Stats:"])
+        orig_print(orig_format(L["  Memory: %.0f KB (%.1f MB)"], memKB, memKB / 1024))
+        orig_print(orig_format(L["  Mode: %s | Step: %d KB/f"], GetModeString(), GetCurrentStepKB()))
+        orig_print(orig_format(L["  Lua steps: %d | Emergency: %d | Full: %d"],
             gcStats.stepsLua, gcStats.emergencyGC, gcStats.fullCollects))
-        orig_print(orig_format("  Loading: %s | Idle: %s | Combat: %s",
-            isLoading and "yes" or "no", isIdle and "yes" or "no", inCombat and "yes" or "no"))
+        orig_print(orig_format(L["  Loading: %s | Idle: %s | Combat: %s"],
+            isLoading and L["yes"] or L["no"], isIdle and L["yes"] or L["no"], inCombat and L["yes"] or L["no"]))
 
         if hasDLL() and LuaBoostC_GetStats then
             local mem, steps, fulls, pause, stepmul, combat, mode, idle, loading = LuaBoostC_GetStats()
             if mem then
-                orig_print(orig_format("  DLL: mem=%.0fKB steps=%d full=%d mode=%s",
-                    mem or 0, steps or 0, fulls or 0, mode or "?"))
+                orig_print(orig_format(L["  DLL: mem=%.0fKB steps=%d full=%d mode=%s"],
+                    mem or 0, steps or 0, fulls or 0, mode or L["?"]))
             end
         end
 
     elseif input == "pool" then
         local acq, rel, cre, cur = LuaBoost_GetPoolStats()
-        orig_print(orig_format(ADDON_COLOR .. "[LuaBoost]|r Pool: %d acquired, %d released, %d created, %d available",
+        orig_print(orig_format(ADDON_COLOR .. L["[LuaBoost]|r Pool: %d acquired, %d released, %d created, %d available"],
             acq, rel, cre, cur))
 
     elseif input == "toggle" then
         db.enabled = not db.enabled
-        if db.enabled then orig_collectgarbage("stop") else orig_collectgarbage("restart") end
+        if db.enabled then
+            orig_collectgarbage("stop")
+        else
+            orig_collectgarbage("restart")
+        end
         ApplyProtectionHooks()
-        Msg("GC Manager: " .. (db.enabled and "|cff00ff00ON|r" or "|cffff0000OFF|r"))
+        Msg(L["GC Manager: "] .. (db.enabled and L["|cff00ff00ON|r"] or L["|cffff0000OFF|r"]))
 
     elseif input == "force" then
         local b = orig_collectgarbage("count")
@@ -1480,25 +1552,27 @@ SlashCmdList["LUABOOST"] = function(input)
             orig_collectgarbage("collect")
         end
         local a = orig_collectgarbage("count")
-        Msg(orig_format("Freed %.1f MB", (b - a) / 1024))
+        Msg(orig_format(L["Freed %.1f MB"], (b - a) / 1024))
         gcStats.fullCollects = gcStats.fullCollects + 1
         orig_collectgarbage("stop")
 
     elseif input == "sl" or input == "speedyload" then
         db.speedyLoadEnabled = not db.speedyLoadEnabled
-        Msg("SpeedyLoad: " .. (db.speedyLoadEnabled and "|cff00ff00ON|r" or "|cffff0000OFF|r")
-            .. " (" .. db.speedyLoadMode .. ", " .. #GetSpeedyEventList() .. " events)")
+        local status = db.speedyLoadEnabled and L["|cff00ff00ON|r"] or L["|cffff0000OFF|r"]
+        local mode = db.speedyLoadMode == "aggressive" and L["aggressive"] or L["safe"]
+        local count = #GetSpeedyEventList()
+        Msg(string.format(L["SpeedyLoad: %s (%s, %d events)"], status, mode, count))
 
     elseif input == "sl safe" or input == "speedyload safe" then
         db.speedyLoadEnabled = true
         db.speedyLoadMode = "safe"
-        Msg("SpeedyLoad: |cff00ff00ON|r (|cff44ff44safe|r, " .. #SPEEDY_SAFE_EVENTS .. " events)")
+        Msg(L["SpeedyLoad: |cff00ff00ON|r (|cff44ff44safe|r, "] .. #SPEEDY_SAFE_EVENTS .. L[" events)"])
 
     elseif input == "sl agg" or input == "sl aggressive"
         or input == "speedyload aggressive" then
         db.speedyLoadEnabled = true
         db.speedyLoadMode = "aggressive"
-        Msg("SpeedyLoad: |cff00ff00ON|r (|cffff8844aggressive|r, " .. #SPEEDY_AGGRESSIVE_EVENTS .. " events)")
+        Msg(L["SpeedyLoad: |cff00ff00ON|r (|cffff8844aggressive|r, "] .. #SPEEDY_AGGRESSIVE_EVENTS .. L[" events)"])
 
     -- [v1.2.0] Math auto-detect commands
     elseif input == "mathbench" or input == "math bench" then
@@ -1506,37 +1580,37 @@ SlashCmdList["LUABOOST"] = function(input)
         RunMathAutoDetect(false)
 
     elseif input == "math" then
-        orig_print(ADDON_COLOR .. "[LuaBoost]|r Math functions:")
+        orig_print(ADDON_COLOR .. L["[LuaBoost]|r Math functions:"])
         local function fn_line(name, use)
             return orig_format("  %s: %s", name,
-                use and "|cff44ff44fast (LuaBoost)|r" or "|cff888888original (Lua/C)|r")
+                use and L["|cff44ff44fast (LuaBoost)|r"] or L["|cff888888original (Lua/C)|r"])
         end
         orig_print(fn_line("math.floor", db.mathUseFloor))
         orig_print(fn_line("math.ceil",  db.mathUseCeil))
         orig_print(fn_line("math.abs",   db.mathUseAbs))
-        orig_print(orig_format("  Auto-detect: %s | Bench: %s",
-            db.mathAutoDetect and "on" or "off",
-            db.mathBenchDone and "done" or "pending"))
-        orig_print("  " .. VALUE_COLOR .. "/lb mathbench|r to re-run detection")
+        orig_print(orig_format(L["  Auto-detect: %s | Bench: %s"],
+            db.mathAutoDetect and L["on"] or L["off"],
+            db.mathBenchDone and L["done"] or L["pending"]))
+        orig_print("  " .. VALUE_COLOR .. L["/lb mathbench|r to re-run detection"])
 
     elseif input == "settings" then
         InterfaceOptionsFrame_OpenToCategory(panelSettings)
         InterfaceOptionsFrame_OpenToCategory(panelSettings)
 
     elseif input == "help" then
-        orig_print(ADDON_COLOR .. "[LuaBoost]|r Commands:")
-        orig_print("  /lb              — status")
-        orig_print("  /lb bench        — benchmark")
-        orig_print("  /lb gc           — GC stats")
-        orig_print("  /lb pool         — table pool stats")
-        orig_print("  /lb toggle       — enable/disable GC manager")
-        orig_print("  /lb force        — force full GC now")
-        orig_print("  /lb sl           — toggle SpeedyLoad")
-        orig_print("  /lb sl safe      — SpeedyLoad safe mode")
-        orig_print("  /lb sl agg       — SpeedyLoad aggressive mode")
-        orig_print("  /lb math         — math optimization status")
-        orig_print("  /lb mathbench    — re-run math auto-detect")
-        orig_print("  /lb settings     — open GC settings")
+        orig_print(ADDON_COLOR .. L["[LuaBoost]|r Commands:"])
+        orig_print(L["  /lb              — status"])
+        orig_print(L["  /lb bench        — benchmark"])
+        orig_print(L["  /lb gc           — GC stats"])
+        orig_print(L["  /lb pool         — table pool stats"])
+        orig_print(L["  /lb toggle       — enable/disable GC manager"])
+        orig_print(L["  /lb force        — force full GC now"])
+        orig_print(L["  /lb sl           — toggle SpeedyLoad"])
+        orig_print(L["  /lb sl safe      — SpeedyLoad safe mode"])
+        orig_print(L["  /lb sl agg       — SpeedyLoad aggressive mode"])
+        orig_print(L["  /lb math         — math optimization status"])
+        orig_print(L["  /lb mathbench    — re-run math auto-detect"])
+        orig_print(L["  /lb settings     — open GC settings"])
     else
         ShowStatus()
     end
@@ -1602,12 +1676,16 @@ initFrame:SetScript("OnEvent", function(self, event, arg1)
         local parts = {}
         parts[#parts + 1] = ADDON_COLOR .. "[LuaBoost]|r v" .. ADDON_VERSION
         parts[#parts + 1] = db.enabled
-            and ("GC:" .. VALUE_COLOR .. (db.preset or "custom") .. "|r")
-            or "GC:|cffff0000OFF|r"
+            and (L["GC:"] .. VALUE_COLOR .. (db.preset or L["custom"]) .. "|r")
+            or L["GC:|cffff0000OFF|r"]
+
         if db.speedyLoadEnabled then
             parts[#parts + 1] = "SL:|cff00ff00" .. db.speedyLoadMode .. "|r"
         end
-        if hasDLL() then parts[#parts + 1] = "|cff00ff00DLL|r" end
+
+        if hasDLL() then
+            parts[#parts + 1] = "|cff00ff00DLL|r"
+        end
 
         -- [v1.2.0] Math status in login message
         if db.mathBenchDone then
@@ -1615,17 +1693,17 @@ initFrame:SetScript("OnEvent", function(self, event, arg1)
             if db.mathUseFloor then mc = mc + 1 end
             if db.mathUseCeil  then mc = mc + 1 end
             if db.mathUseAbs   then mc = mc + 1 end
-            parts[#parts + 1] = orig_format("Math:%s%d/3|r", VALUE_COLOR, mc)
+            parts[#parts + 1] = orig_format(L["Math:%s%d/3|r"], VALUE_COLOR, mc)
         else
-            parts[#parts + 1] = "Math:|cffffff44detecting...|r"
+            parts[#parts + 1] = L["Math:|cffffff44detecting...|r"]
         end
 
-        parts[#parts + 1] = VALUE_COLOR .. "/lb|r help"
+        parts[#parts + 1] = VALUE_COLOR .. L["/lb|r help"]
         orig_print(table.concat(parts, " | "))
 
         if orig_type(SmartGCDB) == "table"
             or (IsAddOnLoaded and (IsAddOnLoaded("SmartGC") or IsAddOnLoaded("!SmartGC"))) then
-            orig_print(ADDON_COLOR .. "[LuaBoost]|r |cffff8844WARNING:|r SmartGC detected. Disable SmartGC to avoid conflicts.")
+            orig_print(ADDON_COLOR .. L["[LuaBoost]|r |cffff8844WARNING:|r SmartGC detected. Disable SmartGC to avoid conflicts."])
         end
     end
 end)

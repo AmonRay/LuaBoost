@@ -9,6 +9,28 @@ Designed for **Warmane** and other 3.3.5a servers.
 
 ---
 
+## 🆕 What's New in v1.2.1
+
+| Feature | Description |
+|---------|-------------|
+| **Localization & UI Polish** | Full localization support added (`enUS`, `koKR`). GUI layout improved with numbered labels to prevent text overlap, especially for non-English users. Huge thanks to [nadugi](https://github.com/nadugi) for this contribution! |
+| **GC Timing Fix** | Fixed a bug where Force Full GC and Emergency GC would sometimes calculate collection time incorrectly. |
+| **Emergency Threshold Cap** | If your PC struggles with full GC during emergencies, the auto-raise threshold is now safely capped at 1000 MB to prevent runaway numbers. |
+| **Teleport Guard** | Added a 2-second cooldown guard during loading screens to prevent double-collects on rapid zone changes. |
+
+*(For v1.2.0 changes like Math Auto-Detect, see older notes).*
+
+---
+
+## 🌍 Localization / Credits
+
+- **English (`enUS`)**: Default
+- **Korean (`koKR`)**: Translated and optimized by [**nadugi**](https://github.com/nadugi)
+
+*If you want to translate LuaBoost to your language, feel free to submit a Pull Request! Just copy `enUS.lua`, rename it to your locale (e.g., `ruRU.lua`), translate the strings, and add it to `!LuaBoost.toc`.*
+
+---
+
 ## ✅ Features
 
 ### Runtime Optimizations (automatic, always active)
@@ -19,14 +41,13 @@ Designed for **Warmane** and other 3.3.5a servers.
 - Table pool: `LuaBoost_AcquireTable()` / `LuaBoost_ReleaseTable(t)` / `LuaBoost_GetPoolStats()`
 - `GetDateCached(fmt)` — opt-in cached date helper (does **not** replace global `date()`)
 
-### Math Auto-Detect (v1.2.1)
+### Math Auto-Detect
 On first login, LuaBoost runs a quick micro-benchmark (200k iterations) to test whether its pure-Lua math replacements are actually faster than the original C implementations on **your specific CPU**.
 
 - If a fast replacement is **slower** (beyond 5% tolerance) → **reverts to original** automatically
 - Result is **saved** in `SavedVariables` — bench only runs once
 - `/lb math` — check current status
 - `/lb mathbench` — re-run detection manually
-- Toggle in `ESC → Interface → AddOns → LuaBoost → Tools`
 
 ### Smart GC Manager (configurable)
 - Stops Lua auto-GC and performs **incremental GC steps every frame**
@@ -67,16 +88,6 @@ Works with **[wow_optimize.dll](https://github.com/suprepupre/wow-optimize)**:
 
 ---
 
-## 🆕 What's New in v1.2.1
-
-- fix(LuaBoost): correct GC timing and add teleport guard
-- Fix debugprofilestop without debugprofilestart in force GC button
-- Add 2-second guard to prevent double full GC on teleport
-- Cap emergency threshold auto-raise at 1000 MB
-
-
----
-
 ## ⚙️ Settings Reference
 
 Open settings: `ESC → Interface → AddOns → LuaBoost → GC Settings`
@@ -102,7 +113,7 @@ At 60 FPS with Normal Step = 50 KB:
 
 | Setting | What it does | Increase if... | Decrease if... |
 |---------|-------------|----------------|----------------|
-| **Emergency Full GC (MB)** | When Lua memory exceeds this value (outside combat), LuaBoost forces a **full garbage collection**. This is a blocking operation — the game freezes until it's done. | **You get freezes after boss kills** or dungeon queue pops. Set to 500+ for heavy addon setups. | You want memory to stay low and don't mind occasional brief pauses (light addon setup) |
+| **Emergency Full GC (MB)** | When Lua memory exceeds this value (outside combat), LuaBoost forces a **full garbage collection**. This is a blocking operation — the game freezes until it's done. Auto-raises if the collection takes >50ms (capped at 1000 MB). | **You get freezes after boss kills** or dungeon queue pops. Set to 500+ for heavy addon setups. | You want memory to stay low and don't mind occasional brief pauses (light addon setup) |
 | **Idle Timeout (sec)** | Seconds without player activity before switching to idle GC mode (higher step size) | You want faster cleanup during brief AFK moments | You don't want aggressive GC to kick in while reading chat/AH |
 
 ### Why Emergency Full GC Causes Freezes
@@ -160,9 +171,8 @@ The solution is **not** to disable emergency GC, but to:
 ### Quick Fix
 
 Switch to **Strong** preset:
-```
-/lb settings
-```
+  /lb settings
+
 Click the **Strong** button. Done.
 
 ### Manual Fix
@@ -217,19 +227,15 @@ If you keep LuaBoost SpeedyLoad **disabled** (default), KPack SpeedyLoad can rem
 
 ## 📦 Installation
 
-### Recommended (early load order)
-LuaBoost must be loaded first, so the `!` prefix is used:
+Copy the addon folder into your WoW directory:
 
-Copy the addon folder:
-```
 Interface/AddOns/!LuaBoost/
 ├── !LuaBoost.toc
-└── LuaBoost.lua
-```
+├── LuaBoost.lua
+├── enUS.lua
+└── koKR.lua
 
-If you downloaded from GitHub, make sure the extracted folder is named `!LuaBoost`.
-
-Restart WoW or `/reload`.
+*(Make sure the folder is named `!LuaBoost` so it loads early).*
 
 ### Recommended combo
 
@@ -263,33 +269,20 @@ Restart WoW or `/reload`.
 ## 📊 SpeedyLoad Event Lists
 
 ### Safe Mode (11 events)
-```
+
 SPELLS_CHANGED, SPELL_UPDATE_USABLE, ACTIONBAR_SLOT_CHANGED,
 USE_GLYPH, PLAYER_TALENT_UPDATE, PET_TALENT_UPDATE,
 WORLD_MAP_UPDATE, UPDATE_WORLD_STATES, UPDATE_FACTION,
 CRITERIA_UPDATE, RECEIVED_ACHIEVEMENT_LIST
-```
 
 ### Aggressive Mode (23 events)
 All safe events plus:
-```
+
 ACTIONBAR_UPDATE_STATE, ACTIONBAR_UPDATE_USABLE,
 ACTIONBAR_UPDATE_COOLDOWN, SPELL_UPDATE_COOLDOWN,
 UNIT_AURA, UNIT_INVENTORY_CHANGED, BAG_UPDATE,
 QUEST_LOG_UPDATE, COMPANION_UPDATE, PET_BAR_UPDATE,
 TRADE_SKILL_UPDATE, MERCHANT_UPDATE
-```
-
----
-
-## 📁 Project Structure
-
-```
-!LuaBoost/
-├── !LuaBoost.toc    # Addon metadata (Interface 30300)
-└── LuaBoost.lua     # All addon code (single file)
-```
-
 ---
 
 ## ✅ Compatibility
