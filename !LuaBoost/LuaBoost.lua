@@ -1,23 +1,19 @@
 -- ================================================================
---  LuaBoost v1.2.1 — WoW 3.3.5a Lua Runtime Optimizer
+--  LuaBoost v1.2.2 — WoW 3.3.5a Lua Runtime Optimizer (Taint-Free)
 --  Author: Suprematist
 --
 --  Features:
---   - Faster math.floor/ceil/abs (pure Lua, auto-detect)
---   - Faster table.insert append path
 --   - Per-frame GetTimeCached()
 --   - Shared throttle API, table pool
 --   - Smart incremental GC manager (combat + idle + loading aware)
 --   - SpeedyLoad: event suppression during loading screens
 --   - Optional protection hooks (intercept GC, block memory scans)
---   - DLL integration (wow_optimize.dll v1.2+)
+--   - DLL integration (wow_optimize.dll v1.4+)
 --
---  v1.2.1 changes:
---   - Localization support (enUS, koKR) and UI improvements by @nadugi
---   - Fixed debugprofilestop timing logic in GC methods
---   - Capped emergency GC threshold auto-raise at 1000 MB
---   - Added 2-second guard to prevent double GC on teleport
---   - UI UX Update: Renamed presets to Memory sizes, silenced auto-bench
+--  v1.2.2 changes:
+--   - Removed math.* and table.insert overrides (fixes Taint/Action Blocked)
+--   - Removed math auto-detect feature entirely (unnecessary complexity)
+--   - 100% compatibility with older addons (no string coercion crashes)
 -- ================================================================
 
 local addonName, addonTable = ...
@@ -48,7 +44,7 @@ end
 addonTable.L = L
 
 local ADDON_NAME    = "LuaBoost"
-local ADDON_VERSION = "1.2.1"
+local ADDON_VERSION = "1.2.2"
 local ADDON_COLOR   = "|cff00ccff"
 local VALUE_COLOR   = "|cffffff00"
 
@@ -57,10 +53,6 @@ local VALUE_COLOR   = "|cffffff00"
 -- ================================================================
 local orig_GetTime                = GetTime
 local orig_format                 = string.format
-local orig_tinsert                = table.insert
-local orig_floor                  = math.floor
-local orig_ceil                   = math.ceil
-local orig_abs                    = math.abs
 local orig_pairs                  = pairs
 local orig_ipairs                 = ipairs
 local orig_type                   = type
@@ -80,11 +72,12 @@ local orig_getmetatable           = getmetatable
 local orig_hooksecurefunc         = hooksecurefunc
 local orig_geterrorhandler        = geterrorhandler
 local orig_GetFramesForEvent      = GetFramesRegisteredForEvent
+local orig_floor                  = math.floor
 
 local hasGetFramesForEvent = (orig_type(orig_GetFramesForEvent) == "function")
 
 -- ================================================================
--- PART A: Runtime Optimizations
+-- PART A: Safe Runtime Optimizations
 -- ================================================================
 
 -- A1. Per-frame time cache
@@ -105,146 +98,7 @@ function _G.GetFrameNumber()
     return frameNumber
 end
 
--- A2. Faster math functions (applied eagerly; may be reverted by auto-detect)
-local function fast_floor(x)
-    return x - x % 1
-end
-
-local function fast_ceil(x)
-    local f = x - x % 1
-    if f == x then
-        return x
-    end
-    return f + 1
-end
-
-local function fast_abs(x)
-    if x < 0 then
-        return -x
-    end
-    return x
-end
-
--- Apply fast versions immediately (will be adjusted after DB loads)
-math.floor = fast_floor
-math.ceil  = fast_ceil
-math.abs   = fast_abs
-
--- A2b. Math auto-detect: apply stored choices from SavedVariables
-local function ApplyMathChoices()
-    if not db then return end
-
-    if db.mathUseFloor then
-        math.floor = fast_floor
-    else
-        math.floor = orig_floor
-    end
-
-    if db.mathUseCeil then
-        math.ceil = fast_ceil
-    else
-        math.ceil = orig_ceil
-    end
-
-    if db.mathUseAbs then
-        math.abs = fast_abs
-    else
-        math.abs = orig_abs
-    end
-end
-
--- Forward declaration (db defined later)
-local db
-
--- A2c. Math auto-detect benchmark
-local MATH_BENCH_N = 200000
-local MATH_BENCH_TOLERANCE = 1.05  -- keep fast if within 5% of original
-
-local function RunMathAutoDetect(silent)
-    if not db then return end
-
-    local N = MATH_BENCH_N
-    local dummy = 0
-
-    -- Warmup
-    for i = 1, 5000 do dummy = orig_floor(i * 1.7) end
-    for i = 1, 5000 do dummy = fast_floor(i * 1.7) end
-    for i = 1, 5000 do dummy = orig_ceil(i * 1.3) end
-    for i = 1, 5000 do dummy = fast_ceil(i * 1.3) end
-    for i = 1, 5000 do dummy = orig_abs(i * -1.5) end
-    for i = 1, 5000 do dummy = fast_abs(i * -1.5) end
-
-    -- Floor
-    orig_debugprofilestart()
-    for i = 1, N do dummy = orig_floor(i * 1.7) end
-    local floor_orig_t = orig_debugprofilestop()
-
-    orig_debugprofilestart()
-    for i = 1, N do dummy = fast_floor(i * 1.7) end
-    local floor_fast_t = orig_debugprofilestop()
-
-    -- Ceil
-    orig_debugprofilestart()
-    for i = 1, N do dummy = orig_ceil(i * 1.3) end
-    local ceil_orig_t = orig_debugprofilestop()
-
-    orig_debugprofilestart()
-    for i = 1, N do dummy = fast_ceil(i * 1.3) end
-    local ceil_fast_t = orig_debugprofilestop()
-
-    -- Abs
-    orig_debugprofilestart()
-    for i = 1, N do dummy = orig_abs(i * -1.5) end
-    local abs_orig_t = orig_debugprofilestop()
-
-    orig_debugprofilestart()
-    for i = 1, N do dummy = fast_abs(i * -1.5) end
-    local abs_fast_t = orig_debugprofilestop()
-
-    -- Decide: use fast unless it's >5% slower than original
-    db.mathUseFloor = (floor_fast_t <= floor_orig_t * MATH_BENCH_TOLERANCE)
-    db.mathUseCeil  = (ceil_fast_t  <= ceil_orig_t  * MATH_BENCH_TOLERANCE)
-    db.mathUseAbs   = (abs_fast_t   <= abs_orig_t   * MATH_BENCH_TOLERANCE)
-    db.mathBenchDone = true
-
-    ApplyMathChoices()
-
-    -- Report
-    if not silent then
-        local function tag(use, fast_t, orig_t)
-            if use then
-                return L["|cff44ff44fast|r"]
-            else
-                return orig_format(L["|cffff4444original|r (fast was %.0f%% slower)"], ((fast_t / orig_t) - 1) * 100)
-            end
-        end
-
-        orig_print(ADDON_COLOR .. string.format(L["[LuaBoost]|r Math auto-detect results (%d iterations):"], N))
-        orig_print(orig_format(L["  math.floor: orig %6.1f ms, fast %6.1f ms > %s"], floor_orig_t, floor_fast_t, tag(db.mathUseFloor, floor_fast_t, floor_orig_t)))
-        orig_print(orig_format(L["  math.ceil:  orig %6.1f ms, fast %6.1f ms > %s"], ceil_orig_t, ceil_fast_t, tag(db.mathUseCeil, ceil_fast_t, ceil_orig_t)))
-        orig_print(orig_format(L["  math.abs:   orig %6.1f ms, fast %6.1f ms > %s"], abs_orig_t, abs_fast_t, tag(db.mathUseAbs, abs_fast_t, abs_orig_t)))
-
-        local count = 0
-        if db.mathUseFloor then count = count + 1 end
-        if db.mathUseCeil  then count = count + 1 end
-        if db.mathUseAbs   then count = count + 1 end
-        orig_print(orig_format(L["  Using fast versions for %d/3 functions. Saved to settings."], count))
-    end
-end
-
--- A3. Faster table.insert for append pattern
-local function fast_tinsert(t, pos, value)
-    if value == nil then
-        t[#t + 1] = pos
-    else
-        orig_tinsert(t, pos, value)
-    end
-end
-
-table.insert = fast_tinsert
-_G.tinsert   = fast_tinsert
-
--- A4. Shared throttle API
+-- A2. Shared throttle API
 local throttles = {}
 
 function _G.LuaBoost_Throttle(id, interval)
@@ -258,7 +112,7 @@ function _G.LuaBoost_Throttle(id, interval)
     return false
 end
 
--- A5. Shared table pool
+-- A3. Shared table pool
 local pool      = {}
 local poolCount = 0
 local POOL_MAX  = 200
@@ -296,7 +150,7 @@ function _G.LuaBoost_GetPoolStats()
     return poolStats.acquired, poolStats.released, poolStats.created, poolCount
 end
 
--- A6. Cached date() — opt-in API (does not replace _G.date)
+-- A4. Cached date() — opt-in API (does not replace _G.date)
 local cachedDate       = ""
 local cachedDateFormat = ""
 local cachedDateTime   = 0
@@ -315,7 +169,7 @@ function _G.GetDateCached(fmt, t)
     return cachedDate
 end
 
--- A7. Lua 5.0 compatibility shims
+-- A5. Lua 5.0 compatibility shims (Safe, as they don't replace existing 5.1 functions)
 if not table.getn then table.getn = function(t) return #t end end
 if not table.setn then table.setn = function() end end
 if not table.foreach then
@@ -357,13 +211,6 @@ local defaults = {
 
     speedyLoadEnabled      = false,
     speedyLoadMode         = "safe",
-
-    -- Math auto-detect
-    mathAutoDetect         = true,
-    mathBenchDone          = false,
-    mathUseFloor           = true,
-    mathUseCeil            = true,
-    mathUseAbs             = true,
 }
 
 local presets = {
@@ -393,7 +240,7 @@ local presets = {
     },
 }
 
--- db forward-declared above (local db)
+local db
 
 local inCombat     = false
 local isIdle       = false
@@ -439,9 +286,6 @@ local function InitDB()
     end
 
     db = LuaBoostDB
-
-    -- Apply stored math choices immediately
-    ApplyMathChoices()
 end
 
 local function ApplyPreset(name)
@@ -978,79 +822,6 @@ loadFrame:SetScript("OnEvent", function(self, event)
 end)
 
 -- ================================================================
--- PART D: Benchmark
--- ================================================================
-
-local function FormatBenchLine(label, orig_t, fast_t, suffix)
-    suffix = suffix or ""
-    if orig_t <= 0 then
-        return orig_format("  %-14s %7.1f ms -> %7.1f ms%s", label, orig_t, fast_t, suffix)
-    end
-    local p = (1 - fast_t / orig_t) * 100
-    if p >= 0 then
-        return orig_format(L["  %-14s %7.1f ms -> %7.1f ms  (|cff44ff44%.0f%% faster|r)%s"], label, orig_t, fast_t, p, suffix)
-    else
-        return orig_format(L["  %-14s %7.1f ms -> %7.1f ms  (|cffff4444%.0f%% slower|r)%s"], label, orig_t, fast_t, -p, suffix)
-    end
-end
-
-local function RunBenchmark()
-    local N = 1000000
-    local dummy = 0
-
-    orig_print(ADDON_COLOR .. string.format(L["[LuaBoost]|r Running benchmark (%d iterations)..."], N))
-
-    orig_debugprofilestart()
-    for i = 1, N do dummy = orig_floor(i * 1.7) end
-    local floor_orig = orig_debugprofilestop()
-
-    orig_debugprofilestart()
-    for i = 1, N do dummy = fast_floor(i * 1.7) end
-    local floor_fast = orig_debugprofilestop()
-
-    orig_debugprofilestart()
-    for i = 1, N do dummy = orig_ceil(i * 1.3) end
-    local ceil_orig = orig_debugprofilestop()
-
-    orig_debugprofilestart()
-    for i = 1, N do dummy = fast_ceil(i * 1.3) end
-    local ceil_fast = orig_debugprofilestop()
-
-    orig_debugprofilestart()
-    for i = 1, N do dummy = orig_abs(i * -1.5) end
-    local abs_orig = orig_debugprofilestop()
-
-    orig_debugprofilestart()
-    for i = 1, N do dummy = fast_abs(i * -1.5) end
-    local abs_fast = orig_debugprofilestop()
-
-    local K = 100000
-    local benchTable = {}
-    orig_debugprofilestart()
-    for i = 1, K do orig_tinsert(benchTable, i) end
-    local insert_orig = orig_debugprofilestop()
-
-    benchTable = {}
-    orig_debugprofilestart()
-    for i = 1, K do benchTable[#benchTable + 1] = i end
-    local insert_fast = orig_debugprofilestop()
-
-    local function activeTag(use)
-        if use then
-            return L[" |cff44ff44[active]|r"]
-        else
-            return L[" |cff888888[original]|r"]
-        end
-    end
-
-    orig_print(ADDON_COLOR .. L["[LuaBoost]|r Results (lower ms = better):"])
-    orig_print(FormatBenchLine("math.floor:",   floor_orig,  floor_fast,  db and activeTag(db.mathUseFloor) or ""))
-    orig_print(FormatBenchLine("math.ceil:",    ceil_orig,   ceil_fast,   db and activeTag(db.mathUseCeil) or ""))
-    orig_print(FormatBenchLine("math.abs:",     abs_orig,    abs_fast,    db and activeTag(db.mathUseAbs) or ""))
-    orig_print(FormatBenchLine("table.insert:", insert_orig, insert_fast, " (100k)"))
-end
-
--- ================================================================
 -- PART E: GUI (Interface Options)
 -- ================================================================
 local function Label(parent, text, x, y, template)
@@ -1186,7 +957,7 @@ panelMain:SetScript("OnShow", function(self)
 
     for _, p in orig_pairs(pdata) do
         local b = CreateFrame("Button", nil, self, "UIPanelButtonTemplate")
-        b:SetSize(115, 22)  
+        b:SetSize(115, 22)
         b:SetPoint("TOPLEFT", p.x, -130)
         b:SetText(p.l)
         b:SetScript("OnClick", function()
@@ -1212,8 +983,6 @@ panelMain:SetScript("OnShow", function(self)
     local speedyModeLabel = Label(self, "", 16, -275, "GameFontHighlightSmall")
     speedyModeLabel:SetWidth(400)
 
-    -- Adjusted layout and added line breaks to prevent font rendering
-    -- glitches and overlapping issues in Korean.
     local function UpdateSpeedyModeLabel()
         if not db or not speedyModeLabel then return end
         local isAggressive = (db.speedyLoadMode == "aggressive")
@@ -1267,7 +1036,6 @@ panelSettings:SetScript("OnShow", function(self)
 
     Label(self, L["Step Sizes (KB collected per frame)"], 16, -46, "GameFontNormal")
 
-    -- [v1.2.0] Expanded slider ranges for heavy addon setups
     Slider(self, L["Normal Step"], L["GC per frame during normal gameplay."], 20, -86,
         1, 500, 5,
         function() return db.frameStepKB end,
@@ -1384,19 +1152,13 @@ panelTools:SetScript("OnShow", function(self)
         orig_collectgarbage("stop")
     end)
 
-    local benchBtn = CreateFrame("Button", nil, self, "UIPanelButtonTemplate")
-    benchBtn:SetSize(170, 22)
-    benchBtn:SetPoint("TOPLEFT", 16, -200)
-    benchBtn:SetText(L["Run Benchmark"])
-    benchBtn:SetScript("OnClick", function() RunBenchmark() end)
-
     local resetBtn = CreateFrame("Button", nil, self, "UIPanelButtonTemplate")
     resetBtn:SetSize(170, 22)
-    resetBtn:SetPoint("TOPLEFT", 16, -228)
+    resetBtn:SetPoint("TOPLEFT", 16, -200)
     resetBtn:SetText(L["Reset All to Defaults"])
     resetBtn:SetScript("OnClick", function()
         StaticPopupDialogs["LUABOOST_RESET"] = {
-            text = L["Reset all LuaBoost settings to defaults?\n(Math auto-detect will re-run on next login)"],
+            text = L["Reset all LuaBoost settings to defaults?"],
             button1 = L["Yes"],
             button2 = L["No"],
             OnAccept = function()
@@ -1412,65 +1174,9 @@ panelTools:SetScript("OnShow", function(self)
         }
         StaticPopup_Show("LUABOOST_RESET")
     end)
-
-    -- [v1.2.0] Math auto-detect section
-    Label(self, L["Math Optimizations"], 16, -268, "GameFontNormal")
-
-    local mathStatusLabel = Label(self, "", 16, -288, "GameFontHighlightSmall")
-    mathStatusLabel:SetWidth(500)
-
-    local function UpdateMathStatus()
-        if not db then return end
-        local function fn_status(use, name)
-            if use then
-                return "|cff44ff44fast|r"
-            else
-                return "|cff888888original|r"
-            end
-        end
-        local benchTag = db.mathBenchDone and L["|cff44ff44done|r"] or L["|cffffff44pending|r"]
-        mathStatusLabel:SetText(orig_format(
-            "floor: %s  |  ceil: %s  |  abs: %s  |  bench: %s",
-            fn_status(db.mathUseFloor, "floor"),
-            fn_status(db.mathUseCeil, "ceil"),
-            fn_status(db.mathUseAbs, "abs"),
-            benchTag
-        ))
-    end
-
-    Checkbox(self, L["Auto-detect math on first run"],
-        L["Runs a quick micro-benchmark on first login to determine\n"]
-        .. L["whether fast math replacements are actually faster on your CPU.\n"]
-        .. L["Result is saved — bench only runs once."],
-        14, -315,
-        function() return db.mathAutoDetect end,
-        function(v) db.mathAutoDetect = v end
-    )
-
-    local mathBenchBtn = CreateFrame("Button", nil, self, "UIPanelButtonTemplate")
-    mathBenchBtn:SetSize(170, 22)
-    mathBenchBtn:SetPoint("TOPLEFT", 16, -345)
-    mathBenchBtn:SetText(L["Re-run Math Auto-detect"])
-    mathBenchBtn:SetScript("OnClick", function()
-        db.mathBenchDone = false
-        RunMathAutoDetect(false)
-        UpdateMathStatus()
-        RefreshAllControls()
-    end)
-
-    -- Initial update
-    UpdateMathStatus()
-
-    -- Refresh math status when panel shows
-    local origRefresh = self.Refresh
-    function self:Refresh()
-        if origRefresh then origRefresh(self) end
-        UpdateMathStatus()
-    end
 end)
 
 InterfaceOptions_AddCategory(panelTools)
-
 
 -- ================================================================
 -- PART F: Slash Commands
@@ -1490,15 +1196,6 @@ local function ShowStatus()
             db.speedyLoadEnabled and L["|cff00ff00ON|r"] or L["|cffaaaaaaOFF|r"],
             db.speedyLoadMode == "aggressive" and L["aggressive"] or L["safe"],
             #GetSpeedyEventList()))
-
-        -- [v1.2.0] Math status
-        local mathCount = 0
-        if db.mathUseFloor then mathCount = mathCount + 1 end
-        if db.mathUseCeil  then mathCount = mathCount + 1 end
-        if db.mathUseAbs   then mathCount = mathCount + 1 end
-        orig_print(orig_format(L["  Math: %d/3 fast | bench: %s"],
-            mathCount,
-            db.mathBenchDone and L["done"] or L["pending"]))
     end
 
     if hasDLL() then
@@ -1515,10 +1212,7 @@ SlashCmdList["LUABOOST"] = function(input)
     if not db then InitDB() end
     input = (input or ""):lower():trim()
 
-    if input == "bench" or input == "benchmark" then
-        RunBenchmark()
-
-    elseif input == "gc" then
+    if input == "gc" then
         local memKB = orig_collectgarbage("count")
         orig_print(ADDON_COLOR .. L["[LuaBoost]|r GC Stats:"])
         orig_print(orig_format(L["  Memory: %.0f KB (%.1f MB)"], memKB, memKB / 1024))
@@ -1582,25 +1276,6 @@ SlashCmdList["LUABOOST"] = function(input)
         db.speedyLoadMode = "aggressive"
         Msg(L["SpeedyLoad: |cff00ff00ON|r (|cffff8844aggressive|r, "] .. #SPEEDY_AGGRESSIVE_EVENTS .. L[" events)"])
 
-    -- [v1.2.0] Math auto-detect commands
-    elseif input == "mathbench" or input == "math bench" then
-        db.mathBenchDone = false
-        RunMathAutoDetect(false) -- False here means it WILL print to chat because user asked for it
-
-    elseif input == "math" then
-        orig_print(ADDON_COLOR .. L["[LuaBoost]|r Math functions:"])
-        local function fn_line(name, use)
-            return orig_format("  %s: %s", name,
-                use and L["|cff44ff44fast (LuaBoost)|r"] or L["|cff888888original (Lua/C)|r"])
-        end
-        orig_print(fn_line("math.floor", db.mathUseFloor))
-        orig_print(fn_line("math.ceil",  db.mathUseCeil))
-        orig_print(fn_line("math.abs",   db.mathUseAbs))
-        orig_print(orig_format(L["  Auto-detect: %s | Bench: %s"],
-            db.mathAutoDetect and L["on"] or L["off"],
-            db.mathBenchDone and L["done"] or L["pending"]))
-        orig_print("  " .. VALUE_COLOR .. L["/lb mathbench|r to re-run detection"])
-
     elseif input == "settings" then
         InterfaceOptionsFrame_OpenToCategory(panelSettings)
         InterfaceOptionsFrame_OpenToCategory(panelSettings)
@@ -1608,7 +1283,6 @@ SlashCmdList["LUABOOST"] = function(input)
     elseif input == "help" then
         orig_print(ADDON_COLOR .. L["[LuaBoost]|r Commands:"])
         orig_print(L["  /lb              — status"])
-        orig_print(L["  /lb bench        — benchmark"])
         orig_print(L["  /lb gc           — GC stats"])
         orig_print(L["  /lb pool         — table pool stats"])
         orig_print(L["  /lb toggle       — enable/disable GC manager"])
@@ -1616,8 +1290,6 @@ SlashCmdList["LUABOOST"] = function(input)
         orig_print(L["  /lb sl           — toggle SpeedyLoad"])
         orig_print(L["  /lb sl safe      — SpeedyLoad safe mode"])
         orig_print(L["  /lb sl agg       — SpeedyLoad aggressive mode"])
-        orig_print(L["  /lb math         — math optimization status"])
-        orig_print(L["  /lb mathbench    — re-run math auto-detect"])
         orig_print(L["  /lb settings     — open GC settings"])
     else
         ShowStatus()
@@ -1634,7 +1306,7 @@ initFrame:SetScript("OnEvent", function(self, event, arg1)
     if event == "ADDON_LOADED" then
         if arg1 ~= ADDON_NAME and arg1 ~= ("!" .. ADDON_NAME) then return end
 
-        InitDB()           
+        InitDB()
         ApplyProtectionHooks()
 
         lastActivity = orig_GetTime()
@@ -1663,39 +1335,20 @@ initFrame:SetScript("OnEvent", function(self, event, arg1)
             if db.enabled then orig_collectgarbage("stop") end
         end
 
-        -- SpeedyLoad: hook UnregisterEvent and ensure priority
         SpeedyLoad_HookUnregister()
         SpeedyLoad_EnsurePriority()
 
-        -- [v1.2.0] Schedule math auto-detect if needed (5 sec delay to avoid login lag)
-        if db.mathAutoDetect and not db.mathBenchDone then
-            local benchDelay = CreateFrame("Frame")
-            local elapsed = 0
-            benchDelay:SetScript("OnUpdate", function(f, dt)
-                elapsed = elapsed + dt
-                if elapsed >= 5 then
-                    f:SetScript("OnUpdate", nil)
-                    RunMathAutoDetect(true) -- Silent mode! No chat output on login.
-                end
-            end)
-        end
-
-        -- Login message (Cleaned up, no math spam)
         local parts = {}
         parts[#parts + 1] = ADDON_COLOR .. "[LuaBoost]|r v" .. ADDON_VERSION
         parts[#parts + 1] = db.enabled
-            and (L["GC:"] .. VALUE_COLOR .. GetPresetNameDisplay(db.preset) .. "|r")
+            and (L["GC: "] .. VALUE_COLOR .. GetPresetNameDisplay(db.preset) .. "|r")
             or L["GC:|cffff0000OFF|r"]
-
-        if db.speedyLoadEnabled then
-            parts[#parts + 1] = "SL:|cff00ff00" .. db.speedyLoadMode .. "|r"
-        end
 
         if hasDLL() then
             parts[#parts + 1] = "|cff00ff00DLL|r"
         end
 
-        parts[#parts + 1] = VALUE_COLOR .. L["/lb|r help"]
+        parts[#parts + 1] = VALUE_COLOR .. L["/lb help|r"]
         orig_print(table.concat(parts, " | "))
 
         if orig_type(SmartGCDB) == "table"
