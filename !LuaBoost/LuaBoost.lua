@@ -1400,7 +1400,7 @@ panelMain:SetScript("OnShow", function(self)
             local total = sk + ps
             local rate = total > 0 and (sk / total * 100) or 0
             tgStatsLabel:SetText(orig_format(
-                L["ThrashGuard: |cff00ff00%d|r hooks | Skipped: |cffffff00%d|r | Passed: |cffffff00%d|r | Rate: |cff00ff00%.0f%%|r",]
+                L["ThrashGuard: |cff00ff00%d|r hooks | Skipped: |cffffff00%d|r | Passed: |cffffff00%d|r | Rate: |cff00ff00%.0f%%|r"],
                 thrashStats.hooked, sk, ps, rate))
         else
             tgStatsLabel:SetText(L["ThrashGuard: |cffaaaaaaInactive|r"])
