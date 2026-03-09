@@ -192,6 +192,33 @@ if not table.foreachi then
 end
 
 -- ================================================================
+-- Master Event Frame — single frame for all event handling
+-- Replaces: combatFrame, burstFrame, activityFrame, loadFrame, initFrame
+-- Saves ~4-5 C++ Frame objects + their dispatch overhead
+-- ================================================================
+
+local eventFrame = CreateFrame("Frame")
+local eventHandlers = {}
+
+local function RegisterHandler(event, handler)
+    if not eventHandlers[event] then
+        eventHandlers[event] = {}
+        eventFrame:RegisterEvent(event)
+    end
+    local handlers = eventHandlers[event]
+    handlers[#handlers + 1] = handler
+end
+
+eventFrame:SetScript("OnEvent", function(self, event, ...)
+    local handlers = eventHandlers[event]
+    if handlers then
+        for i = 1, #handlers do
+            handlers[i](event, ...)
+        end
+    end
+end)
+
+-- ================================================================
 -- PART B: Smart GC Manager
 -- ================================================================
 
@@ -467,10 +494,7 @@ gcFrame:SetScript("OnUpdate", function()
 end)
 
 -- Combat tracking
-local combatFrame = CreateFrame("Frame")
-combatFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
-combatFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
-combatFrame:SetScript("OnEvent", function(self, event)
+local function OnCombatEvent(event)
     if event == "PLAYER_REGEN_DISABLED" then
         inCombat = true
         lastActivity = orig_GetTime()
@@ -498,12 +522,12 @@ combatFrame:SetScript("OnEvent", function(self, event)
             end
         end
     end
-end)
+end
 
--- ================================================================
+RegisterHandler("PLAYER_REGEN_DISABLED", OnCombatEvent)
+RegisterHandler("PLAYER_REGEN_ENABLED", OnCombatEvent)
+
 -- GC Burst on heavy events
--- ================================================================
-local burstFrame = CreateFrame("Frame")
 local burstEvents = {
     "LFG_PROPOSAL_SHOW",
     "LFG_PROPOSAL_SUCCEEDED",
@@ -512,11 +536,8 @@ local burstEvents = {
     "CHAT_MSG_LOOT",
     "ENCOUNTER_END",
 }
-for _, ev in orig_ipairs(burstEvents) do
-    burstFrame:RegisterEvent(ev)
-end
 
-burstFrame:SetScript("OnEvent", function(self, event)
+local function OnBurstEvent(event)
     if not db or not db.enabled then return end
 
     local burstKB = 128
@@ -530,10 +551,13 @@ burstFrame:SetScript("OnEvent", function(self, event)
     end
 
     gcStats.stepsLua = gcStats.stepsLua + 1
-end)
+end
+
+for _, ev in orig_ipairs(burstEvents) do
+    RegisterHandler(ev, OnBurstEvent)
+end
 
 -- Activity tracking (idle reset)
-local activityFrame = CreateFrame("Frame")
 local activityEvents = {
     "PLAYER_STARTED_MOVING", "PLAYER_STOPPED_MOVING",
     "UNIT_SPELLCAST_START", "UNIT_SPELLCAST_SUCCEEDED",
@@ -543,17 +567,18 @@ local activityEvents = {
     "MERCHANT_SHOW", "AUCTION_HOUSE_SHOW", "BANKFRAME_OPENED",
     "MAIL_SHOW", "QUEST_DETAIL",
 }
-for _, event in orig_pairs(activityEvents) do
-    activityFrame:RegisterEvent(event)
-end
 
-activityFrame:SetScript("OnEvent", function()
+local function OnActivityEvent()
     lastActivity = orig_GetTime()
     if isIdle then
         isIdle = false
         WriteIdleGlobal()
     end
-end)
+end
+
+for _, event in orig_pairs(activityEvents) do
+    RegisterHandler(event, OnActivityEvent)
+end
 
 -- ================================================================
 -- PART C: SpeedyLoad — Event Suppression During Loading Screens
@@ -721,20 +746,18 @@ local function SpeedyLoad_HookUnregister()
     end
 end
 
-local loadFrame -- forward declaration
-
 local function SpeedyLoad_EnsurePriority()
-    if not hasGetFramesForEvent or not loadFrame then return end
+    if not hasGetFramesForEvent then return end
 
     local frames = {orig_GetFramesForEvent("PLAYER_ENTERING_WORLD")}
     for i = 1, #frames do
         orig_pcall(frames[i].UnregisterEvent, frames[i], "PLAYER_ENTERING_WORLD")
     end
 
-    loadFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+    eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 
     for i = 1, #frames do
-        if frames[i] ~= loadFrame then
+        if frames[i] ~= eventFrame then
             orig_pcall(frames[i].RegisterEvent, frames[i], "PLAYER_ENTERING_WORLD")
         end
     end
@@ -767,13 +790,7 @@ local function DoPostLoadGC()
     end
 end
 
-loadFrame = CreateFrame("Frame")
-loadFrame:RegisterEvent("PLAYER_LEAVING_WORLD")
-loadFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
-loadFrame:RegisterEvent("LOADING_SCREEN_ENABLED")
-loadFrame:RegisterEvent("LOADING_SCREEN_DISABLED")
-loadFrame:SetScript("OnEvent", function(self, event)
-
+local function OnLoadingEvent(event)
     if event == "PLAYER_LEAVING_WORLD" then
         isLoading = true
         WriteLoadingGlobal()
@@ -823,7 +840,12 @@ loadFrame:SetScript("OnEvent", function(self, event)
             DoPostLoadGC()
         end
     end
-end)
+end
+
+RegisterHandler("PLAYER_LEAVING_WORLD", OnLoadingEvent)
+RegisterHandler("PLAYER_ENTERING_WORLD", OnLoadingEvent)
+RegisterHandler("LOADING_SCREEN_ENABLED", OnLoadingEvent)
+RegisterHandler("LOADING_SCREEN_DISABLED", OnLoadingEvent)
 
 -- ================================================================
 -- PART D: UI Thrashing Protection
@@ -1607,73 +1629,73 @@ end
 -- ================================================================
 -- PART G: Initialization
 -- ================================================================
-local initFrame = CreateFrame("Frame")
-initFrame:RegisterEvent("ADDON_LOADED")
-initFrame:RegisterEvent("PLAYER_LOGIN")
-initFrame:SetScript("OnEvent", function(self, event, arg1)
-    if event == "ADDON_LOADED" then
-        if arg1 ~= ADDON_NAME and arg1 ~= ("!" .. ADDON_NAME) then return end
+local function OnAddonLoaded(event, arg1)
+    if arg1 ~= ADDON_NAME and arg1 ~= ("!" .. ADDON_NAME) then return end
 
+    InitDB()
+    ApplyProtectionHooks()
+
+    lastActivity = orig_GetTime()
+    cachedTime   = orig_GetTime()
+
+    _G.LUABOOST_ADDON_COMBAT  = false
+    _G.LUABOOST_ADDON_IDLE    = false
+    _G.LUABOOST_ADDON_LOADING = false
+
+    if db.enabled then
+        orig_collectgarbage("stop")
+    end
+end
+
+local function OnPlayerLogin(event)
+    -- Unregister init events — no longer needed
+    eventFrame:UnregisterEvent("ADDON_LOADED")
+    eventFrame:UnregisterEvent("PLAYER_LOGIN")
+
+    if not db then
         InitDB()
         ApplyProtectionHooks()
-
         lastActivity = orig_GetTime()
         cachedTime   = orig_GetTime()
-
         _G.LUABOOST_ADDON_COMBAT  = false
         _G.LUABOOST_ADDON_IDLE    = false
         _G.LUABOOST_ADDON_LOADING = false
+        if db.enabled then orig_collectgarbage("stop") end
+    end
 
-        if db.enabled then
-            orig_collectgarbage("stop")
-        end
+    SpeedyLoad_HookUnregister()
+    SpeedyLoad_EnsurePriority()
 
-    elseif event == "PLAYER_LOGIN" then
-        self:UnregisterEvent("ADDON_LOADED")
-        self:UnregisterEvent("PLAYER_LOGIN")
-
-        if not db then
-            InitDB()
-            ApplyProtectionHooks()
-            lastActivity = orig_GetTime()
-            cachedTime   = orig_GetTime()
-            _G.LUABOOST_ADDON_COMBAT  = false
-            _G.LUABOOST_ADDON_IDLE    = false
-            _G.LUABOOST_ADDON_LOADING = false
-            if db.enabled then orig_collectgarbage("stop") end
-        end
-
-        SpeedyLoad_HookUnregister()
-        SpeedyLoad_EnsurePriority()
-        
-        -- Install UI Thrashing Protection
-        if db.thrashGuardEnabled then
-            local tgOk, tgErr = orig_pcall(InstallThrashGuard)
-            if not tgOk then
-                DebugMsg("ThrashGuard install error: " .. tostring(tgErr))
-            end
-        end
-
-        local parts = {}
-        parts[#parts + 1] = ADDON_COLOR .. "[LuaBoost]|r v" .. ADDON_VERSION
-        parts[#parts + 1] = db.enabled
-            and (L["GC: "] .. VALUE_COLOR .. GetPresetNameDisplay(db.preset) .. "|r")
-            or L["GC:|cffff0000OFF|r"]
-
-        if hasDLL() then
-            parts[#parts + 1] = "|cff00ff00DLL|r"
-        end
-
-        if thrashStats.active then
-            parts[#parts + 1] = "|cff00ff00TG:" .. thrashStats.hooked .. "|r"
-        end
-
-        parts[#parts + 1] = VALUE_COLOR .. L["/lb help|r"]
-        orig_print(table.concat(parts, " | "))
-
-        if orig_type(SmartGCDB) == "table"
-            or (IsAddOnLoaded and (IsAddOnLoaded("SmartGC") or IsAddOnLoaded("!SmartGC"))) then
-            orig_print(ADDON_COLOR .. L["[LuaBoost]|r |cffff8844WARNING:|r SmartGC detected. Disable SmartGC to avoid conflicts."])
+    -- Install UI Thrashing Protection
+    if db.thrashGuardEnabled then
+        local tgOk, tgErr = orig_pcall(InstallThrashGuard)
+        if not tgOk then
+            DebugMsg("ThrashGuard install error: " .. tostring(tgErr))
         end
     end
-end)
+
+    local parts = {}
+    parts[#parts + 1] = ADDON_COLOR .. "[LuaBoost]|r v" .. ADDON_VERSION
+    parts[#parts + 1] = db.enabled
+        and (L["GC: "] .. VALUE_COLOR .. GetPresetNameDisplay(db.preset) .. "|r")
+        or L["GC:|cffff0000OFF|r"]
+
+    if hasDLL() then
+        parts[#parts + 1] = "|cff00ff00DLL|r"
+    end
+
+    if thrashStats.active then
+        parts[#parts + 1] = "|cff00ff00TG:" .. thrashStats.hooked .. "|r"
+    end
+
+    parts[#parts + 1] = VALUE_COLOR .. L["/lb help|r"]
+    orig_print(table.concat(parts, " | "))
+
+    if orig_type(SmartGCDB) == "table"
+        or (IsAddOnLoaded and (IsAddOnLoaded("SmartGC") or IsAddOnLoaded("!SmartGC"))) then
+        orig_print(ADDON_COLOR .. L["[LuaBoost]|r |cffff8844WARNING:|r SmartGC detected. Disable SmartGC to avoid conflicts."])
+    end
+end
+
+RegisterHandler("ADDON_LOADED", OnAddonLoaded)
+RegisterHandler("PLAYER_LOGIN", OnPlayerLogin)
