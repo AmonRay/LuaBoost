@@ -156,6 +156,8 @@ LuaBoost_Locale_enUS = {
     ["  /lb tg           — UI thrash protection stats"]  = "  /lb tg           — UI thrash protection stats",
     ["  /lb tg toggle    — enable/disable thrash guard"] = "  /lb tg toggle    — enable/disable thrash guard",
     ["  /lb tg reset     — reset thrash guard counters"] = "  /lb tg reset     — reset thrash guard counters",
+    ["  /lb updates      — show registered update callbacks"] = "  /lb updates      — show registered update callbacks",
+    ["  /lb events       — profile events for 10 seconds"] = "  /lb events       — profile events for 10 seconds",
 
     -- PART G: Initialization
     ["GC: "] = "GC: ",
