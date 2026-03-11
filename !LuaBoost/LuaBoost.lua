@@ -1,5 +1,5 @@
 -- ================================================================
---  LuaBoost v1.4.0 — WoW 3.3.5a Lua Runtime Optimizer (Taint-Free)
+--  LuaBoost v1.5.0 — WoW 3.3.5a Lua Runtime Optimizer (Taint-Free)
 --  Author: Suprematist
 --
 --  Features:
@@ -46,7 +46,7 @@ end
 addonTable.L = L
 
 local ADDON_NAME    = "LuaBoost"
-local ADDON_VERSION = "1.4.0"
+local ADDON_VERSION = "1.5.0"
 local ADDON_COLOR   = "|cff00ccff"
 local VALUE_COLOR   = "|cffffff00"
 
@@ -279,7 +279,7 @@ local function StartEventProfiler()
         eventProfiler.counts[k] = nil
     end
     profilerFrame:RegisterAllEvents()
-    Msg("Event profiler |cff00ff00STARTED|r — collecting for 10 seconds...")
+    orig_print(ADDON_COLOR .. "[LuaBoost]|r Event profiler |cff00ff00STARTED|r — collecting for 10 seconds...")
 end
 
 local function StopEventProfiler()
