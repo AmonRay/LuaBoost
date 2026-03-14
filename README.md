@@ -97,6 +97,8 @@ Hooks widget metatable methods globally and caches the last value. If the new va
 - `coreFrame` handles both time cache and GC stepping
 - Minimal C++ Frame object count
 
+> **Note:** wow_optimize.dll v1.7.0+ includes C-level hooks for `FontString:SetText` + all three StatusBar methods. If using the DLL, ThrashGuard is redundant for StatusBar (but harmless). FontString:SetText was never hooked by LuaBoost (taint issues) — the DLL handles it taint-free.
+
 ---
 
 ## 🔧 Recommended Optimization Ecosystem
@@ -105,6 +107,8 @@ Hooks widget metatable methods globally and caches the last value. If the new va
 |-------|------|--------------|
 | **C / Engine** | [wow_optimize.dll](https://github.com/suprepupre/wow-optimize) | Faster memory allocator, full network latency stack, precision timers, Lua GC from C, combat log fix |
 | **Lua / Runtime** | **!LuaBoost** | Smart GC, SpeedyLoad, UI Thrashing Protection, Event Profiler, OnUpdate API, table pool, GUI |
+
+> 💡 **If using wow_optimize.dll v1.7.0+**, the DLL handles `FontString:SetText` and all StatusBar methods from C level (faster, taint-free). LuaBoost's ThrashGuard still works as a fallback for StatusBar — disable it with `/lb tg toggle` if you want to avoid double-caching.
 
 ---
 
