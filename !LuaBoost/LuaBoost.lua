@@ -42,7 +42,7 @@ end
 addonTable.L = L
 
 local ADDON_NAME    = "LuaBoost"
-local ADDON_VERSION = "1.5.1"
+local ADDON_VERSION = "1.6.0"
 local ADDON_COLOR   = "|cff00ccff"
 local VALUE_COLOR   = "|cffffff00"
 
@@ -497,6 +497,14 @@ local function InitDB()
     db = LuaBoostDB
 end
 
+local function SyncStepsToDLL()
+    if not db then return end
+    _G.LUABOOST_ADDON_STEP_NORMAL  = db.frameStepKB
+    _G.LUABOOST_ADDON_STEP_COMBAT  = db.combatStepKB
+    _G.LUABOOST_ADDON_STEP_IDLE    = db.idleStepKB
+    _G.LUABOOST_ADDON_STEP_LOADING = db.loadingStepKB
+end
+
 local function ApplyPreset(name)
     local p = presets[name]
     if not p then return end
@@ -504,6 +512,7 @@ local function ApplyPreset(name)
         db[k] = v
     end
     db.preset = name
+    SyncStepsToDLL()
 end
 
 local function GetPresetNameDisplay(p)
@@ -1647,25 +1656,25 @@ panelSettings:SetScript("OnShow", function(self)
     Slider(self, L["Normal Step"], L["GC per frame during normal gameplay."], 20, -86,
         1, 500, 5,
         function() return db.frameStepKB end,
-        function(v) db.frameStepKB = v; db.preset = "custom" end
+        function(v) db.frameStepKB = v; db.preset = "custom"; SyncStepsToDLL() end
     )
 
     Slider(self, L["Combat Step"], L["GC per frame in combat (keep low to protect frametime)."], 20, -138,
         0, 100, 1,
         function() return db.combatStepKB end,
-        function(v) db.combatStepKB = v; db.preset = "custom" end
+        function(v) db.combatStepKB = v; db.preset = "custom"; SyncStepsToDLL() end
     )
 
     Slider(self, L["Idle Step"], L["GC per frame while AFK/idle."], 20, -190,
         10, 1000, 10,
         function() return db.idleStepKB end,
-        function(v) db.idleStepKB = v; db.preset = "custom" end
+        function(v) db.idleStepKB = v; db.preset = "custom"; SyncStepsToDLL() end
     )
 
     Slider(self, L["Loading Step"], L["GC per frame during loading screens (no rendering)."], 20, -242,
         50, 1000, 25,
         function() return db.loadingStepKB end,
-        function(v) db.loadingStepKB = v; db.preset = "custom" end
+        function(v) db.loadingStepKB = v; db.preset = "custom"; SyncStepsToDLL() end
     )
 
     Label(self, L["Thresholds"], 16, -286, "GameFontNormal")
@@ -1808,6 +1817,14 @@ local function ShowStatus()
 
     if hasDLL() then
         orig_print(L["  wow_optimize.dll: |cff00ff00CONNECTED|r"])
+        if _G.LUABOOST_DLL_UICACHE_ACTIVE then
+            local uiSk = _G.LUABOOST_DLL_UICACHE_SKIPPED or 0
+            local uiPs = _G.LUABOOST_DLL_UICACHE_PASSED or 0
+            local total = uiSk + uiPs
+            local rate = total > 0 and (uiSk / total * 100) or 0
+            orig_print(orig_format("  UI Cache: |cff00ff00%.0f%%|r skip (%d skipped, %d passed)",
+                rate, uiSk, uiPs))
+        end
     else
         orig_print(L["  wow_optimize.dll: |cffaaaaaaNOT DETECTED|r"])
     end
@@ -1849,6 +1866,15 @@ SlashCmdList["LUABOOST"] = function(input)
             if mem then
                 orig_print(orig_format(L["  DLL: mem=%.0fKB steps=%d full=%d mode=%s"],
                     mem or 0, steps or 0, fulls or 0, mode or L["?"]))
+            end
+            if LuaBoostC_GetUIStats then
+                local sk, ps, active = LuaBoostC_GetUIStats()
+                if active then
+                    local total = sk + ps
+                    local rate = total > 0 and (sk / total * 100) or 0
+                    orig_print(orig_format("  DLL UI Cache: %.0f%% skip (%d skipped, %d passed)",
+                        rate, sk, ps))
+                end
             end
         end
 
@@ -2002,6 +2028,8 @@ local function OnAddonLoaded(event, arg1)
     if db.enabled then
         orig_collectgarbage("stop")
     end
+
+    SyncStepsToDLL()
 end
 
 local function OnPlayerLogin(event)
