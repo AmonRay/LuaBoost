@@ -1,5 +1,5 @@
 -- ================================================================
---  LuaBoost v1.5.0 — WoW 3.3.5a Lua Runtime Optimizer (Taint-Free)
+--  LuaBoost v1.5.1 — WoW 3.3.5a Lua Runtime Optimizer (Taint-Free)
 --  Author: Suprematist
 --
 --  Features:
@@ -9,9 +9,6 @@
 --   - SpeedyLoad: event suppression during loading screens
 --   - Optional protection hooks (intercept GC, block memory scans)
 --   - DLL integration (wow_optimize.dll v1.4+)
---
---  v1.3.0 changes:
---   - Added UI Thrashing Protection (StatusBar only, 100% taint free)
 -- ================================================================
 
 local addonName, addonTable = ...
@@ -34,7 +31,6 @@ end
 local locale = GetLocale()
 local localeData = _G["LuaBoost_Locale_" .. locale]
 
-local locale = GetLocale()
 if locale ~= "enUS" then
     if localeData then
         for k, v in pairs(localeData) do
@@ -46,7 +42,7 @@ end
 addonTable.L = L
 
 local ADDON_NAME    = "LuaBoost"
-local ADDON_VERSION = "1.5.0"
+local ADDON_VERSION = "1.6.0"
 local ADDON_COLOR   = "|cff00ccff"
 local VALUE_COLOR   = "|cffffff00"
 
@@ -129,6 +125,7 @@ end
 function _G.LuaBoost_ReleaseTable(t)
     if orig_type(t) ~= "table" then return end
     if poolCount >= POOL_MAX then return end
+    if orig_getmetatable(t) then return end
 
     poolStats.released = poolStats.released + 1
 
@@ -197,10 +194,13 @@ end
 -- Moving mouse over a crowd calls it 30-60 times/sec.
 -- throttle to max 10/sec — imperceptible visually.
 
-local tooltipThrottleInterval = 0.1  -- 100ms = max 10 updates/sec
-local lastTooltipUnit = 0
-local lastTooltipSpell = 0
-local lastTooltipItem = 0
+local tooltipThrottleInterval = 0.1
+local lastTooltipUnitTime = 0
+local lastTooltipUnitArg = nil
+local lastTooltipSpellTime = 0
+local lastTooltipSpellArg = nil
+local lastTooltipItemTime = 0
+local lastTooltipItemArg = nil
 
 do
     local gt = GameTooltip
@@ -210,31 +210,43 @@ do
             gt.SetUnit = function(self, unit)
                 local now = cachedTime
                 if now == 0 then now = orig_GetTime() end
-                if (now - lastTooltipUnit) < tooltipThrottleInterval then return end
-                lastTooltipUnit = now
+                if unit == lastTooltipUnitArg then
+                    return origSetUnit(self, unit)
+                end
+                if (now - lastTooltipUnitTime) < tooltipThrottleInterval then return end
+                lastTooltipUnitTime = now
+                lastTooltipUnitArg = unit
                 return origSetUnit(self, unit)
             end
         end
 
         local origSetSpell = gt.SetSpell
         if origSetSpell then
-            gt.SetSpell = function(self, ...)
+            gt.SetSpell = function(self, id, bookType)
                 local now = cachedTime
                 if now == 0 then now = orig_GetTime() end
-                if (now - lastTooltipSpell) < tooltipThrottleInterval then return end
-                lastTooltipSpell = now
-                return origSetSpell(self, ...)
+                if id == lastTooltipSpellArg then
+                    return origSetSpell(self, id, bookType)
+                end
+                if (now - lastTooltipSpellTime) < tooltipThrottleInterval then return end
+                lastTooltipSpellTime = now
+                lastTooltipSpellArg = id
+                return origSetSpell(self, id, bookType)
             end
         end
 
-        local origSetItem = gt.SetHyperlink
-        if origSetItem then
+        local origSetHyperlink = gt.SetHyperlink
+        if origSetHyperlink then
             gt.SetHyperlink = function(self, link)
                 local now = cachedTime
                 if now == 0 then now = orig_GetTime() end
-                if (now - lastTooltipItem) < tooltipThrottleInterval then return end
-                lastTooltipItem = now
-                return origSetItem(self, link)
+                if link == lastTooltipItemArg then
+                    return origSetHyperlink(self, link)
+                end
+                if (now - lastTooltipItemTime) < tooltipThrottleInterval then return end
+                lastTooltipItemTime = now
+                lastTooltipItemArg = link
+                return origSetHyperlink(self, link)
             end
         end
     end
@@ -485,6 +497,14 @@ local function InitDB()
     db = LuaBoostDB
 end
 
+local function SyncStepsToDLL()
+    if not db then return end
+    _G.LUABOOST_ADDON_STEP_NORMAL  = db.frameStepKB
+    _G.LUABOOST_ADDON_STEP_COMBAT  = db.combatStepKB
+    _G.LUABOOST_ADDON_STEP_IDLE    = db.idleStepKB
+    _G.LUABOOST_ADDON_STEP_LOADING = db.loadingStepKB
+end
+
 local function ApplyPreset(name)
     local p = presets[name]
     if not p then return end
@@ -492,6 +512,7 @@ local function ApplyPreset(name)
         db[k] = v
     end
     db.preset = name
+    SyncStepsToDLL()
 end
 
 local function GetPresetNameDisplay(p)
@@ -633,7 +654,7 @@ coreFrame:SetScript("OnUpdate", function(self, elapsed)
     if not db or not db.enabled then return end
 
     -- Idle detection
-    if not isIdle and not inCombat and not isLoading and (orig_GetTime() - lastActivity) > db.idleTimeout then
+    if not isIdle and not inCombat and not isLoading and (cachedTime - lastActivity) > db.idleTimeout then
         isIdle = true
         WriteIdleGlobal()
         DebugMsg(L["Idle mode activated"])
@@ -655,7 +676,7 @@ coreFrame:SetScript("OnUpdate", function(self, elapsed)
         gcMemCheckCounter = 0
         memKB = orig_collectgarbage("count")
     end
-    if memKB and memKB > (db.fullCollectThresholdMB * 1024) and not inCombat and not isLoading  then
+    if memKB and memKB > (db.fullCollectThresholdMB * 1024) and not inCombat and not isLoading and elapsed < 0.033 then
         orig_debugprofilestart()
         orig_collectgarbage("collect")
         orig_collectgarbage("collect")
@@ -807,8 +828,7 @@ end)
 -- Combat tracking
 local function OnCombatEvent(event)
     if event == "PLAYER_REGEN_DISABLED" then
-        inCombat = true
-        lastActivity = orig_GetTime()
+        lastActivity = cachedTime > 0 and cachedTime or orig_GetTime()
         if isIdle then isIdle = false; WriteIdleGlobal() end
         WriteCombatGlobal()
 
@@ -817,8 +837,7 @@ local function OnCombatEvent(event)
         end
 
     elseif event == "PLAYER_REGEN_ENABLED" then
-        inCombat = false
-        lastActivity = orig_GetTime()
+        lastActivity = cachedTime > 0 and cachedTime or orig_GetTime()
         WriteCombatGlobal()
 
         if hasDLL() and LuaBoostC_SetCombat then
@@ -882,7 +901,7 @@ local activityEvents = {
 }
 
 local function OnActivityEvent()
-    lastActivity = orig_GetTime()
+    lastActivity = cachedTime > 0 and cachedTime or orig_GetTime()
     if isIdle then
         isIdle = false
         WriteIdleGlobal()
@@ -973,8 +992,9 @@ local function SpeedyLoad_Suppress()
     local count = 0
 
     for event, frames in orig_pairs(speedyTracked) do
-        for i = 1, orig_select("#", orig_GetFramesForEvent(event)) do
-            local frame = orig_select(i, orig_GetFramesForEvent(event))
+        local registered = {orig_GetFramesForEvent(event)}
+        for i = 1, #registered do
+            local frame = registered[i]
             if frame and frame ~= speedyFrame then
                 local unreg = frame.UnregisterEvent
                 if unreg then
@@ -1127,7 +1147,7 @@ local function OnLoadingEvent(event)
 
         isLoading = false
         WriteLoadingGlobal()
-        lastActivity = orig_GetTime()
+        lastActivity = cachedTime > 0 and cachedTime or orig_GetTime()
         if isIdle then
             isIdle = false
             WriteIdleGlobal()
@@ -1144,7 +1164,7 @@ local function OnLoadingEvent(event)
         if isLoading then
             isLoading = false
             WriteLoadingGlobal()
-            lastActivity = orig_GetTime()
+            lastActivity = cachedTime > 0 and cachedTime or orig_GetTime()
             if isIdle then
                 isIdle = false
                 WriteIdleGlobal()
@@ -1636,25 +1656,25 @@ panelSettings:SetScript("OnShow", function(self)
     Slider(self, L["Normal Step"], L["GC per frame during normal gameplay."], 20, -86,
         1, 500, 5,
         function() return db.frameStepKB end,
-        function(v) db.frameStepKB = v; db.preset = "custom" end
+        function(v) db.frameStepKB = v; db.preset = "custom"; SyncStepsToDLL() end
     )
 
     Slider(self, L["Combat Step"], L["GC per frame in combat (keep low to protect frametime)."], 20, -138,
         0, 100, 1,
         function() return db.combatStepKB end,
-        function(v) db.combatStepKB = v; db.preset = "custom" end
+        function(v) db.combatStepKB = v; db.preset = "custom"; SyncStepsToDLL() end
     )
 
     Slider(self, L["Idle Step"], L["GC per frame while AFK/idle."], 20, -190,
         10, 1000, 10,
         function() return db.idleStepKB end,
-        function(v) db.idleStepKB = v; db.preset = "custom" end
+        function(v) db.idleStepKB = v; db.preset = "custom"; SyncStepsToDLL() end
     )
 
     Slider(self, L["Loading Step"], L["GC per frame during loading screens (no rendering)."], 20, -242,
         50, 1000, 25,
         function() return db.loadingStepKB end,
-        function(v) db.loadingStepKB = v; db.preset = "custom" end
+        function(v) db.loadingStepKB = v; db.preset = "custom"; SyncStepsToDLL() end
     )
 
     Label(self, L["Thresholds"], 16, -286, "GameFontNormal")
@@ -1797,6 +1817,14 @@ local function ShowStatus()
 
     if hasDLL() then
         orig_print(L["  wow_optimize.dll: |cff00ff00CONNECTED|r"])
+        if _G.LUABOOST_DLL_UICACHE_ACTIVE then
+            local uiSk = _G.LUABOOST_DLL_UICACHE_SKIPPED or 0
+            local uiPs = _G.LUABOOST_DLL_UICACHE_PASSED or 0
+            local total = uiSk + uiPs
+            local rate = total > 0 and (uiSk / total * 100) or 0
+            orig_print(orig_format("  UI Cache: |cff00ff00%.0f%%|r skip (%d skipped, %d passed)",
+                rate, uiSk, uiPs))
+        end
     else
         orig_print(L["  wow_optimize.dll: |cffaaaaaaNOT DETECTED|r"])
     end
@@ -1838,6 +1866,15 @@ SlashCmdList["LUABOOST"] = function(input)
             if mem then
                 orig_print(orig_format(L["  DLL: mem=%.0fKB steps=%d full=%d mode=%s"],
                     mem or 0, steps or 0, fulls or 0, mode or L["?"]))
+            end
+            if LuaBoostC_GetUIStats then
+                local sk, ps, active = LuaBoostC_GetUIStats()
+                if active then
+                    local total = sk + ps
+                    local rate = total > 0 and (sk / total * 100) or 0
+                    orig_print(orig_format("  DLL UI Cache: %.0f%% skip (%d skipped, %d passed)",
+                        rate, sk, ps))
+                end
             end
         end
 
@@ -1991,6 +2028,8 @@ local function OnAddonLoaded(event, arg1)
     if db.enabled then
         orig_collectgarbage("stop")
     end
+
+    SyncStepsToDLL()
 end
 
 local function OnPlayerLogin(event)
@@ -2014,9 +2053,13 @@ local function OnPlayerLogin(event)
 
     -- Install UI Thrashing Protection
     if db.thrashGuardEnabled then
-        local tgOk, tgErr = orig_pcall(InstallThrashGuard)
-        if not tgOk then
-            DebugMsg("ThrashGuard install error: " .. tostring(tgErr))
+        if hasDLL() then
+            DebugMsg("ThrashGuard: skipped — DLL C-level hooks handle StatusBar caching")
+        else
+            local tgOk, tgErr = orig_pcall(InstallThrashGuard)
+            if not tgOk then
+                DebugMsg("ThrashGuard install error: " .. tostring(tgErr))
+            end
         end
     end
 
@@ -2032,6 +2075,8 @@ local function OnPlayerLogin(event)
 
     if thrashStats.active then
         parts[#parts + 1] = "|cff00ff00TG:" .. thrashStats.hooked .. "|r"
+    elseif db.thrashGuardEnabled and hasDLL() then
+        parts[#parts + 1] = "|cff00ff00TG:DLL|r"
     end
 
     parts[#parts + 1] = VALUE_COLOR .. L["/lb help|r"]
