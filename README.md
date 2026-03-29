@@ -1,4 +1,4 @@
-﻿# ⚡ LuaBoost v1.9.1
+﻿# ⚡ LuaBoost v1.9.2
 
 **Lua runtime optimizer + GC manager + loading helpers for WoW 3.3.5a**  
 Author: **Suprematist**
