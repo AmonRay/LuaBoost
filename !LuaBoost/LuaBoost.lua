@@ -1,5 +1,5 @@
 -- ================================================================
---  LuaBoost v1.9.1 — WoW 3.3.5a Lua Runtime Optimizer (Taint-Free)
+--  LuaBoost v1.9.2 — WoW 3.3.5a Lua Runtime Optimizer (Taint-Free)
 --  Author: Suprematist
 --
 --  Features:
@@ -42,7 +42,7 @@ end
 addonTable.L = L
 
 local ADDON_NAME    = "LuaBoost"
-local ADDON_VERSION = "1.9.1"
+local ADDON_VERSION = "1.9.2
 local ADDON_COLOR   = "|cff00ccff"
 local VALUE_COLOR   = "|cffffff00"
 
@@ -2146,14 +2146,41 @@ local function OnPlayerLogin(event)
     end
 
     -- Install UI Thrashing Protection
+    -- After /reload, the DLL needs a few seconds to re-register its Lua globals.
+    -- delay ThrashGuard installation to give the DLL time to set LUABOOST_DLL_LOADED.
     if db.thrashGuardEnabled then
         if hasDLL() then
             DebugMsg("ThrashGuard: skipped — DLL C-level hooks handle StatusBar caching")
         else
-            local tgOk, tgErr = orig_pcall(InstallThrashGuard)
-            if not tgOk then
-                DebugMsg("ThrashGuard install error: " .. tostring(tgErr))
-            end
+            -- Schedule a delayed check: if DLL appears within 8 seconds, skip ThrashGuard
+            local tgCheckFrame = CreateFrame("Frame")
+            local tgElapsed = 0
+            local tgInstalled = false
+            tgCheckFrame:SetScript("OnUpdate", function(self, el)
+                tgElapsed = tgElapsed + el
+                if hasDLL() then
+                    -- DLL showed up (e.g. after /reload re-init)
+                    DebugMsg("ThrashGuard: skipped — DLL detected after delay")
+                    if tgInstalled then
+                        UninstallThrashGuard()
+                        DebugMsg("ThrashGuard: uninstalled — DLL took over")
+                    end
+                    self:SetScript("OnUpdate", nil)
+                    return
+                end
+                if tgElapsed >= 8 then
+                    -- DLL didn't appear — install Lua-side ThrashGuard
+                    if not tgInstalled then
+                        local tgOk, tgErr = orig_pcall(InstallThrashGuard)
+                        if tgOk then
+                            tgInstalled = true
+                        else
+                            DebugMsg("ThrashGuard install error: " .. tostring(tgErr))
+                        end
+                    end
+                    self:SetScript("OnUpdate", nil)
+                end
+            end)
         end
     end
 
@@ -2169,8 +2196,8 @@ local function OnPlayerLogin(event)
 
     if thrashStats.active then
         parts[#parts + 1] = "|cff00ff00TG:" .. thrashStats.hooked .. "|r"
-    elseif db.thrashGuardEnabled and hasDLL() then
-        parts[#parts + 1] = "|cff00ff00TG:DLL|r"
+    elseif db.thrashGuardEnabled then
+        parts[#parts + 1] = "|cffffff00TG:wait|r"
     end
 
     parts[#parts + 1] = VALUE_COLOR .. L["/lb help|r"]
